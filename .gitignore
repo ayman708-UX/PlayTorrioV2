@@ -44,6 +44,10 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Android signing
+android/release.keystore
+android/key.properties
+
 # TorrServer binaries — CI downloads these automatically.
 # For local dev, grab them from https://github.com/YouROK/TorrServer/releases
 assets/bin/android/TorrServer*

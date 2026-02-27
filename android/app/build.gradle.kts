@@ -46,9 +46,22 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Use release signing config if available, otherwise fall back to debug
+            signingConfig = if (project.hasProperty("PLAYTORRIO_KEYSTORE_PATH")) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+        }
+    }
+    
+    // Release signing configuration (uses environment variables or gradle.properties)
+    signingConfigs {
+        create("release") {
+            storeFile = file(project.findProperty("PLAYTORRIO_KEYSTORE_PATH") as String? ?: "release.keystore")
+            storePassword = project.findProperty("PLAYTORRIO_KEYSTORE_PASSWORD") as String? ?: ""
+            keyAlias = project.findProperty("PLAYTORRIO_KEY_ALIAS") as String? ?: "playtorrio"
+            keyPassword = project.findProperty("PLAYTORRIO_KEY_PASSWORD") as String? ?: ""
         }
     }
 }

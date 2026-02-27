@@ -53,6 +53,14 @@ jobs:
 
           ls -lh android/app/src/main/jniLibs/*/libtorrserver.so
 
+      - name: Setup release signing
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/release.keystore
+          echo "PLAYTORRIO_KEYSTORE_PATH=release.keystore" >> android/gradle.properties
+          echo "PLAYTORRIO_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> android/gradle.properties
+          echo "PLAYTORRIO_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/gradle.properties
+          echo "PLAYTORRIO_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/gradle.properties
+
       - name: Tune Gradle for CI runner
         run: |
           cat > android/gradle.properties << 'EOF'

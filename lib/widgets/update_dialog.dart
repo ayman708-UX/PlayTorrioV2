@@ -475,6 +475,7 @@ class _UpdateDialogState extends State<UpdateDialog> with SingleTickerProviderSt
       
       final contentLength = response.contentLength ?? 0;
       int downloadedBytes = 0;
+      int lastUpdateTime = DateTime.now().millisecondsSinceEpoch;
       
       final sink = file.openWrite();
       
@@ -482,9 +483,13 @@ class _UpdateDialogState extends State<UpdateDialog> with SingleTickerProviderSt
         sink.add(chunk);
         downloadedBytes += chunk.length;
         
-        if (contentLength > 0 && mounted) {
+        // Throttle UI updates to every 100ms for smoother progress
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (contentLength > 0 && mounted && (now - lastUpdateTime > 100 || downloadedBytes == contentLength)) {
+          lastUpdateTime = now;
+          final progress = downloadedBytes / contentLength;
           setState(() {
-            _downloadProgress = downloadedBytes / contentLength;
+            _downloadProgress = progress;
           });
         }
       }

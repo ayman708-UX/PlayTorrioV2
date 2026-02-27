@@ -486,12 +486,51 @@ class _DetailsScreenState extends State<DetailsScreen> {
     }
 
     setState(() { _isStremioFetching = true; _errorMessage = null; _stremioStreams = []; _allCombinedStremioStreams = []; _loadedAddonBaseUrls.clear(); });
+    
     try {
+      // For series, first fetch meta to get videos array with season/episode info
+      if (type == 'series') {
+        final meta = await _stremio.getMeta(baseUrl: addonBaseUrl, type: type, id: customId);
+        if (meta != null && meta['videos'] != null) {
+          final videos = meta['videos'] as List;
+          debugPrint('[CustomIdStreams] Got ${videos.length} videos from meta');
+          
+          // Parse videos to build season/episode structure
+          _parseCustomIdVideos(videos);
+          
+          // Now fetch streams for the selected episode
+          final selectedVideo = _getSelectedVideoFromCustomId(videos);
+          if (selectedVideo != null) {
+            final videoId = selectedVideo['id']?.toString() ?? '';
+            debugPrint('[CustomIdStreams] Fetching streams for video: $videoId');
+            final streams = await _stremio.getStreams(baseUrl: addonBaseUrl, type: type, id: videoId);
+            debugPrint('[CustomIdStreams] Got ${streams.length} streams');
+            
+            if (mounted) {
+              final tagged = streams.map((s) {
+                if (s is Map<String, dynamic>) {
+                  return <String, dynamic>{...s, '_addonName': addonName, '_addonBaseUrl': addonBaseUrl};
+                }
+                return <String, dynamic>{'_addonName': addonName, '_addonBaseUrl': addonBaseUrl};
+              }).toList();
+              setState(() {
+                _stremioStreams = tagged;
+                _allCombinedStremioStreams = tagged;
+                _loadedAddonBaseUrls.add(addonBaseUrl);
+                _isStremioFetching = false;
+                if (streams.isEmpty) _errorMessage = 'No streams found';
+              });
+            }
+            return;
+          }
+        }
+      }
+      
+      // For movies or if meta fetch failed, use the original ID directly
       final streams = await _stremio.getStreams(baseUrl: addonBaseUrl, type: type, id: customId);
       debugPrint('[CustomIdStreams] Got ${streams.length} streams');
       if (streams.isNotEmpty) debugPrint('[CustomIdStreams] First stream: ${streams.first}');
       if (mounted) {
-        // Tag streams with addon info so they work with the chip filter
         final tagged = streams.map((s) {
           if (s is Map<String, dynamic>) {
             return <String, dynamic>{...s, '_addonName': addonName, '_addonBaseUrl': addonBaseUrl};
@@ -509,6 +548,65 @@ class _DetailsScreenState extends State<DetailsScreen> {
     } catch (e) {
       if (mounted) setState(() { _errorMessage = 'Error: $e'; _isStremioFetching = false; _loadedAddonBaseUrls.add(addonBaseUrl); });
     }
+  }
+
+  /// Parses the videos array from custom ID meta to build season/episode structure
+  void _parseCustomIdVideos(List videos) {
+    if (videos.isEmpty) return;
+    
+    // Build a map of seasons to episodes
+    final Map<int, List<Map<String, dynamic>>> seasonMap = {};
+    for (final video in videos) {
+      if (video is! Map) continue;
+      final season = video['season'] as int? ?? 1;
+      final episode = video['episode'] as int? ?? 1;
+      
+      seasonMap.putIfAbsent(season, () => []);
+      seasonMap[season]!.add({
+        'id': video['id'],
+        'title': video['title'] ?? 'Episode $episode',
+        'episode': episode,
+        'season': season,
+        'thumbnail': video['thumbnail'],
+        'released': video['released'],
+      });
+    }
+    
+    // Sort episodes within each season
+    for (final episodes in seasonMap.values) {
+      episodes.sort((a, b) => (a['episode'] as int).compareTo(b['episode'] as int));
+    }
+    
+    // Store in _seasonData format compatible with existing UI
+    if (mounted) {
+      setState(() {
+        _seasonData = {
+          'seasons': seasonMap.keys.toList()..sort(),
+          'episodesBySeason': seasonMap,
+        };
+        // Ensure selected season/episode are valid
+        if (!seasonMap.containsKey(_selectedSeason)) {
+          _selectedSeason = seasonMap.keys.first;
+        }
+        final episodes = seasonMap[_selectedSeason] ?? [];
+        if (episodes.isEmpty || _selectedEpisode > episodes.length) {
+          _selectedEpisode = episodes.isNotEmpty ? episodes.first['episode'] : 1;
+        }
+      });
+    }
+  }
+
+  /// Gets the selected video from the custom ID videos array
+  Map<String, dynamic>? _getSelectedVideoFromCustomId(List videos) {
+    for (final video in videos) {
+      if (video is! Map) continue;
+      final season = video['season'] as int? ?? 1;
+      final episode = video['episode'] as int? ?? 1;
+      if (season == _selectedSeason && episode == _selectedEpisode) {
+        return video as Map<String, dynamic>;
+      }
+    }
+    return null;
   }
 
   /// Fetches streams from a single selected addon only.
@@ -1335,6 +1433,14 @@ class _DetailsScreenState extends State<DetailsScreen> {
   // ═══════════════════════════════════════════════════════════════════════════
 
   Widget _buildSeasonSelector() {
+    // Get season count from either TMDB or custom ID data
+    int seasonCount = _movie.numberOfSeasons;
+    if (_seasonData != null && _seasonData!['seasons'] != null) {
+      // Custom ID format
+      final seasons = _seasonData!['seasons'] as List<int>;
+      seasonCount = seasons.length;
+    }
+    
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1360,13 +1466,25 @@ class _DetailsScreenState extends State<DetailsScreen> {
           child: ListView.separated(
             controller: _seasonScrollController,
             scrollDirection: Axis.horizontal,
-            itemCount: _movie.numberOfSeasons,
+            itemCount: seasonCount,
             separatorBuilder: (_, _) => const SizedBox(width: 8),
             itemBuilder: (_, i) {
               final n = i + 1;
               final sel = _selectedSeason == n;
               return FocusableControl(
-                onTap: () => _fetchSeason(n),
+                onTap: () {
+                  // For custom IDs, just update state and re-fetch
+                  if (widget.stremioItem != null && _seasonData != null && _seasonData!['episodesBySeason'] != null) {
+                    setState(() {
+                      _selectedSeason = n;
+                      _selectedEpisode = 1;
+                    });
+                    _fetchStremioStreamsForCustomId(widget.stremioItem!);
+                  } else {
+                    // For TMDB, fetch season data
+                    _fetchSeason(n);
+                  }
+                },
                 borderRadius: 20,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180),
@@ -1397,8 +1515,21 @@ class _DetailsScreenState extends State<DetailsScreen> {
       return const SizedBox(height: 140,
         child: Center(child: CircularProgressIndicator(color: AppTheme.primaryColor, strokeWidth: 2)));
     }
-    if (_seasonData == null || _seasonData!['episodes'] == null) return const SizedBox.shrink();
-    final episodes = _seasonData!['episodes'] as List;
+    
+    // Handle both TMDB format (_seasonData['episodes']) and custom ID format (_seasonData['episodesBySeason'])
+    List episodes = [];
+    if (_seasonData != null) {
+      if (_seasonData!['episodes'] != null) {
+        // TMDB format
+        episodes = _seasonData!['episodes'] as List;
+      } else if (_seasonData!['episodesBySeason'] != null) {
+        // Custom ID format
+        final episodesBySeason = _seasonData!['episodesBySeason'] as Map<int, List<Map<String, dynamic>>>;
+        episodes = episodesBySeason[_selectedSeason] ?? [];
+      }
+    }
+    
+    if (episodes.isEmpty) return const SizedBox.shrink();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1430,9 +1561,12 @@ class _DetailsScreenState extends State<DetailsScreen> {
             separatorBuilder: (_, _) => const SizedBox(width: 12),
             itemBuilder: (_, i) {
               final ep = episodes[i];
-              final epNum = ep['episode_number'] as int;
+              // Handle both TMDB and custom ID formats
+              final epNum = (ep['episode_number'] ?? ep['episode']) as int;
               final sel = _selectedEpisode == epNum;
-              final epName = ep['name'] ?? 'Episode $epNum';
+              final epName = ep['name'] ?? ep['title'] ?? 'Episode $epNum';
+              final thumbnail = ep['still_path'] ?? ep['thumbnail'];
+              
               return FocusableControl(
                 onTap: () {
                   setState(() => _selectedEpisode = epNum);
@@ -1445,7 +1579,12 @@ class _DetailsScreenState extends State<DetailsScreen> {
                   } else if (_selectedSourceId == 'all_stremio') {
                     _fetchAllStremioStreams();
                   } else {
-                    _fetchStremioStreams();
+                    // For custom IDs, re-fetch streams with the new episode
+                    if (widget.stremioItem != null) {
+                      _fetchStremioStreamsForCustomId(widget.stremioItem!);
+                    } else {
+                      _fetchStremioStreams();
+                    }
                   }
                 },
                 borderRadius: 10,
@@ -1464,8 +1603,11 @@ class _DetailsScreenState extends State<DetailsScreen> {
                         child: Stack(fit: StackFit.expand, children: [
                           ClipRRect(
                             borderRadius: const BorderRadius.vertical(top: Radius.circular(9)),
-                            child: ep['still_path'] != null
-                                ? CachedNetworkImage(imageUrl: TmdbApi.getImageUrl(ep['still_path']),
+                            child: thumbnail != null
+                                ? CachedNetworkImage(
+                                    imageUrl: thumbnail.startsWith('http') 
+                                        ? thumbnail 
+                                        : TmdbApi.getImageUrl(thumbnail),
                                     fit: BoxFit.cover,
                                     errorWidget: (c, u, e) => Container(
                                       color: Colors.white.withValues(alpha: 0.06),
