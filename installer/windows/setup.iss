@@ -38,6 +38,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "..\..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+; Clean up old files that might conflict with new version
+Type: filesandordirs; Name: "{app}\data\flutter_assets\*"
+Type: files; Name: "{app}\*.dll.old"
+
 [Icons]
 Name: "{group}\{#MyAppName}";    Filename: "{app}\{#MyAppExeName}"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon

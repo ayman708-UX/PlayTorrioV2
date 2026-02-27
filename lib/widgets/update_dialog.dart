@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
+import 'package:path/path.dart' as path;
 import '../services/app_updater_service.dart';
 import '../utils/app_theme.dart';
 
@@ -380,8 +381,10 @@ class _UpdateDialogState extends State<UpdateDialog> with SingleTickerProviderSt
   Future<void> _handleUpdate() async {
     if (Platform.isAndroid) {
       await _downloadAndInstallAndroid();
+    } else if (Platform.isWindows || Platform.isLinux) {
+      await _downloadAndInstallDesktop();
     } else {
-      // For desktop platforms (including macOS), open browser
+      // macOS - open browser
       await AppUpdaterService().openDownloadPage(widget.updateInfo.downloadUrl);
       if (mounted) {
         Navigator.of(context).pop();
@@ -444,6 +447,131 @@ class _UpdateDialogState extends State<UpdateDialog> with SingleTickerProviderSt
         setState(() => _isDownloading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Update failed: $e')),
+        );
+      }
+    }
+  }
+  
+  Future<void> _downloadAndInstallDesktop() async {
+    setState(() {
+      _isDownloading = true;
+      _downloadProgress = 0.0;
+    });
+    
+    try {
+      // Determine download directory and file extension
+      final dir = Platform.isWindows 
+          ? Directory(Platform.environment['USERPROFILE']! + r'\Downloads')
+          : Directory(Platform.environment['HOME']! + '/Downloads');
+      
+      final extension = Platform.isWindows ? '.exe' : '.AppImage';
+      final fileName = 'PlayTorrio-${widget.updateInfo.latestVersion}$extension';
+      final filePath = path.join(dir.path, fileName);
+      final file = File(filePath);
+      
+      // Download with progress
+      final request = http.Request('GET', Uri.parse(widget.updateInfo.downloadUrl));
+      final response = await request.send();
+      
+      final contentLength = response.contentLength ?? 0;
+      int downloadedBytes = 0;
+      
+      final sink = file.openWrite();
+      
+      await for (final chunk in response.stream) {
+        sink.add(chunk);
+        downloadedBytes += chunk.length;
+        
+        if (contentLength > 0 && mounted) {
+          setState(() {
+            _downloadProgress = downloadedBytes / contentLength;
+          });
+        }
+      }
+      
+      await sink.close();
+      
+      if (mounted) {
+        setState(() => _isDownloading = false);
+        
+        // Show success dialog with instructions
+        await showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            backgroundColor: const Color(0xFF1A0B2E),
+            title: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 32),
+                SizedBox(width: 12),
+                Text('Download Complete', style: TextStyle(color: Colors.white)),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Update downloaded to:',
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.7)),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: SelectableText(
+                    filePath,
+                    style: const TextStyle(
+                      color: AppTheme.primaryColor,
+                      fontSize: 12,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  Platform.isWindows
+                      ? 'Close PlayTorrio and run the installer to update.'
+                      : 'Make the file executable and run it:\nchmod +x "$fileName"\n./$fileName',
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.9)),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  // Open file location
+                  if (Platform.isWindows) {
+                    await Process.run('explorer', ['/select,', filePath]);
+                  } else if (Platform.isLinux) {
+                    await Process.run('xdg-open', [dir.path]);
+                  }
+                  if (context.mounted) Navigator.of(context).pop();
+                },
+                child: const Text('Open Folder'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primaryColor,
+                ),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        
+        if (mounted) {
+          Navigator.of(context).pop();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isDownloading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Download failed: $e')),
         );
       }
     }
