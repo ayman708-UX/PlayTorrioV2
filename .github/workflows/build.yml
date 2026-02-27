@@ -19,66 +19,7 @@ env:
 jobs:
 
   # ─── Android ──────────────────────────────────────────────────────────────
-  android:
-    name:  Android (Split APKs)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
-
-      - name: Download TorrServer for each ABI
-        run: |
-          TORR_URL="https://github.com/$TORRSERVER_REPO/releases/latest/download"
-          mkdir -p android/app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}
-
-          echo "⬇ arm64-v8a ..."
-          curl -fSL "$TORR_URL/TorrServer-android-arm64" \
-            -o android/app/src/main/jniLibs/arm64-v8a/libtorrserver.so
-
-          echo "⬇ armeabi-v7a ..."
-          curl -fSL "$TORR_URL/TorrServer-android-arm7" \
-            -o android/app/src/main/jniLibs/armeabi-v7a/libtorrserver.so
-
-          echo "⬇ x86_64 (Chromebooks / emulators) ..."
-          curl -fSL "$TORR_URL/TorrServer-android-amd64" \
-            -o android/app/src/main/jniLibs/x86_64/libtorrserver.so
-
-          ls -lh android/app/src/main/jniLibs/*/libtorrserver.so
-
-      - name: Setup release signing
-        run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/release.keystore
-          echo "PLAYTORRIO_KEYSTORE_PATH=release.keystore" >> android/gradle.properties
-          echo "PLAYTORRIO_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> android/gradle.properties
-          echo "PLAYTORRIO_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/gradle.properties
-          echo "PLAYTORRIO_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/gradle.properties
-
-      - name: Tune Gradle for CI runner
-        run: |
-          cat > android/gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=2G -XX:+HeapDumpOnOutOfMemoryError
-          android.useAndroidX=true
-          EOF
-
-      - run: flutter pub get
-
-      - name: Build split APKs
-        run: |
-          flutter build apk --release --split-per-abi \
-            --obfuscate --split-debug-info=build/app/outputs/symbols
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PlayTorrio-Android-APKs
-          path: build/app/outputs/flutter-apk/app-*-release.apk
+  # Android builds are done manually and uploaded to releases
 
   # ─── Windows ──────────────────────────────────────────────────────────────
   windows:
@@ -259,7 +200,7 @@ jobs:
   # ─── Create GitHub Release ───────────────────────────────────────────────
   release:
     name:  Create Release
-    needs: [android, windows, linux-x64, macos-arm64]
+    needs: [windows, linux-x64, macos-arm64]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -272,7 +213,6 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
-            PlayTorrio-Android-APKs/*.apk
             PlayTorrio-Windows-Installer/*.exe
             PlayTorrio-Linux-x64/*.AppImage
             PlayTorrio-macOS-arm64/*.zip
