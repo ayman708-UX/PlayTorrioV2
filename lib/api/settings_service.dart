@@ -28,6 +28,7 @@ class SettingsService {
   // Prowlarr settings
   static const String _prowlarrBaseUrlKey = 'prowlarr_base_url';
   static const String _prowlarrApiKeyKey = 'prowlarr_api_key';
+  static const String _prowlarrTagIdsKey = 'prowlarr_tag_ids';
 
   // Light mode (performance)
   static const String _lightModeKey = 'light_mode';
@@ -248,6 +249,21 @@ class SettingsService {
            apiKey != null && apiKey.isNotEmpty;
   }
 
+  Future<List<int>> getProwlarrTagIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getStringList(_prowlarrTagIdsKey) ?? [];
+    return stored
+        .map((s) => int.tryParse(s) ?? -1)
+        .where((id) => id >= 0)
+        .toList();
+  }
+
+  Future<void> setProwlarrTagIds(List<int> tagIds) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+        _prowlarrTagIdsKey, tagIds.map((id) => id.toString()).toList());
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Torrent Cache Settings
   // ═══════════════════════════════════════════════════════════════════════════
@@ -393,7 +409,7 @@ class SettingsService {
       if (v != null) prefsMap[key] = v;
     }
     // StringList keys
-    for (final key in [_stremioAddonsKey, _navbarConfigKey]) {
+    for (final key in [_stremioAddonsKey, _navbarConfigKey, _prowlarrTagIdsKey]) {
       final v = prefs.getStringList(key);
       if (v != null) prefsMap[key] = v;
     }
@@ -450,7 +466,7 @@ class SettingsService {
       }
     }
     // StringList keys
-    for (final key in [_stremioAddonsKey, _navbarConfigKey]) {
+    for (final key in [_stremioAddonsKey, _navbarConfigKey, _prowlarrTagIdsKey]) {
       if (prefsMap.containsKey(key)) {
         await prefs.setStringList(
             key, (prefsMap[key] as List).cast<String>());

@@ -1255,12 +1255,22 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
 
       if (baseUrl == null || apiKey == null) throw Exception('Prowlarr configuration missing');
 
+      // Resolve any saved tag filter to indexer IDs for this session.
+      // Empty tag selection means no filter — use all torrent indexers.
+      final tagIds = await _settings.getProwlarrTagIds();
+      List<int>? allowedIndexerIds;
+      if (tagIds.isNotEmpty) {
+        final resolved = await _prowlarr.resolveTagIndexerIds(baseUrl, apiKey, tagIds);
+        if (resolved.isNotEmpty) allowedIndexerIds = resolved;
+        // If resolved is empty (tags exist but no matching indexers), fall back to all.
+      }
+
       if (_movie.mediaType == 'tv') {
         final s = _selectedSeason.toString().padLeft(2, '0');
         final e = _selectedEpisode.toString().padLeft(2, '0');
         final results = await Future.wait([
-          _prowlarr.search(baseUrl, apiKey, '${_movie.title} S$s'),
-          _prowlarr.search(baseUrl, apiKey, '${_movie.title} S${s}E$e'),
+          _prowlarr.search(baseUrl, apiKey, '${_movie.title} S$s', indexerIds: allowedIndexerIds),
+          _prowlarr.search(baseUrl, apiKey, '${_movie.title} S${s}E$e', indexerIds: allowedIndexerIds),
         ]);
         if (mounted) {
           final filteredSeason = await TorrentFilter.filterTorrentsAsync(results[0], _movie.title, requiredSeason: _selectedSeason);
@@ -1280,7 +1290,7 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       } else {
         final year = _movie.releaseDate.length >= 4 ? _movie.releaseDate.substring(0, 4) : '';
         final query = year.isNotEmpty ? '${_movie.title} $year' : _movie.title;
-        final results = await _prowlarr.search(baseUrl, apiKey, query);
+        final results = await _prowlarr.search(baseUrl, apiKey, query, indexerIds: allowedIndexerIds);
         if (mounted) {
           final filtered = await TorrentFilter.filterTorrentsAsync(results, _movie.title);
           if (mounted) {

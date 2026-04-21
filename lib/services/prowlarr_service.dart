@@ -3,6 +3,14 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/torrent_result.dart';
 
+/// A tag defined in Prowlarr
+class ProwlarrTag {
+  final int id;
+  final String label;
+
+  const ProwlarrTag({required this.id, required this.label});
+}
+
 /// Result of a Prowlarr connection test
 class ConnectionTestResult {
   final bool success;
@@ -27,12 +35,15 @@ class ProwlarrService {
   /// Prowlarr automatically searches sub-categories when the parent is used.
   static const List<int> _categories = [2000, 5000];
 
-  /// Search for torrents using Prowlarr
+  /// Search for torrents using Prowlarr.
+  /// If [indexerIds] is provided and non-empty, only those indexers are queried.
+  /// Pass null or an empty list to search all torrent indexers (indexerIds=-2).
   Future<List<TorrentResult>> search(
     String baseUrl,
     String apiKey,
-    String query,
-  ) async {
+    String query, {
+    List<int>? indexerIds,
+  }) async {
     try {
       final normalizedUrl = _normalizeBaseUrl(baseUrl);
       debugPrint('🔍 Prowlarr Search Starting...');
@@ -40,20 +51,24 @@ class ProwlarrService {
       debugPrint('   Query: "$query"');
       debugPrint('   API Key: ${apiKey.substring(0, 8)}...');
 
-      // KEY FIX: indexerIds=-2 means ALL torrent indexers.
-      //          indexerIds=-1 (the old value) means ALL USENET indexers — wrong!
-      //          Prowlarr docs: https://wiki.servarr.com/prowlarr/search
+      // indexerIds=-2 means ALL torrent indexers.
+      // indexerIds=-1 means ALL USENET indexers — wrong for torrents!
+      // When specific indexer IDs are provided (from tag filtering), use those instead.
       //
       // Categories: only pass top-level (2000=Movies, 5000=TV).
       // Sub-categories like 5030/5040 cause Prowlarr to exclude indexers
       // that don't explicitly advertise those caps, causing 400 errors.
       // Prowlarr automatically includes sub-categories of a parent.
       //
-      // Repeated 'categories' keys are required — not comma-separated.
+      // Repeated query keys are required — not comma-separated.
       final categoriesQuery = _categories.map((c) => 'categories=$c').join('&');
+      final indexerIdsQuery = (indexerIds != null && indexerIds.isNotEmpty)
+          ? indexerIds.map((id) => 'indexerIds=$id').join('&')
+          : 'indexerIds=-2';
+      debugPrint('   Indexer filter: $indexerIdsQuery');
       final fullQuery =
           'query=${Uri.encodeQueryComponent(query)}'
-          '&indexerIds=-2'   // -2 = all torrents, -1 = all usenet (NOT what we want)
+          '&$indexerIdsQuery'
           '&type=search'
           '&$categoriesQuery';
 
@@ -247,6 +262,58 @@ class ProwlarrService {
       return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
     }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  /// Fetch all tags configured in Prowlarr.
+  Future<List<ProwlarrTag>> fetchTags(String baseUrl, String apiKey) async {
+    final normalizedUrl = _normalizeBaseUrl(baseUrl);
+    final uri = Uri.parse('$normalizedUrl/api/v1/tag');
+    final response = await _client.get(
+      uri,
+      headers: {'X-Api-Key': apiKey},
+    ).timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to fetch Prowlarr tags (HTTP ${response.statusCode})');
+    }
+    final List<dynamic> data = jsonDecode(response.body) as List<dynamic>;
+    return data.map((e) {
+      final m = e as Map<String, dynamic>;
+      return ProwlarrTag(id: m['id'] as int, label: m['label'] as String);
+    }).toList();
+  }
+
+  /// Resolve a list of tag IDs to the indexer IDs that have at least one
+  /// of those tags. Returns an empty list if no indexers match, in which
+  /// case the caller should fall back to searching all indexers.
+  Future<List<int>> resolveTagIndexerIds(
+    String baseUrl,
+    String apiKey,
+    List<int> tagIds,
+  ) async {
+    if (tagIds.isEmpty) return [];
+    final normalizedUrl = _normalizeBaseUrl(baseUrl);
+    final uri = Uri.parse('$normalizedUrl/api/v1/indexer');
+    final response = await _client.get(
+      uri,
+      headers: {'X-Api-Key': apiKey},
+    ).timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) {
+      throw Exception('Failed to fetch Prowlarr indexers (HTTP ${response.statusCode})');
+    }
+    final List<dynamic> data = jsonDecode(response.body) as List<dynamic>;
+    final tagSet = tagIds.toSet();
+    final result = <int>[];
+    for (final item in data) {
+      final m = item as Map<String, dynamic>;
+      final protocol = m['protocol'] as String?;
+      if (protocol == 'usenet') continue; // skip usenet indexers
+      final tags = (m['tags'] as List<dynamic>?)?.map((t) => t as int).toList() ?? [];
+      if (tags.any((t) => tagSet.contains(t))) {
+        result.add(m['id'] as int);
+      }
+    }
+    debugPrint('🏷️  Tag filter: tags=$tagIds → indexerIds=$result');
+    return result;
   }
 
   /// Normalize base URL — remove trailing slashes
