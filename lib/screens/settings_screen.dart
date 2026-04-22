@@ -1278,7 +1278,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             ),
-            onChanged: (_) => setState(() => _prowlarrTestResult = null),
+            onChanged: (_) => setState(() {
+              _prowlarrTestResult = null;
+              _prowlarrTagsLoaded = false;
+              _prowlarrAvailableTags = [];
+            }),
           ),
           const SizedBox(height: 16),
           const Text('API Key', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
@@ -1293,12 +1297,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             ),
-            onChanged: (_) => setState(() => _prowlarrTestResult = null),
+            onChanged: (_) => setState(() {
+              _prowlarrTestResult = null;
+              _prowlarrTagsLoaded = false;
+              _prowlarrAvailableTags = [];
+            }),
           ),
-          if (_prowlarrTagsLoaded && _prowlarrAvailableTags.isNotEmpty) ...[
-            const SizedBox(height: 20),
-            const Text('Filter by Tag', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
+          const SizedBox(height: 20),
+          const Text('Filter by Tag', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          if (!_prowlarrTagsLoaded) ...[
+            Text(
+              'Use the Test Connection button to load available tags.',
+              style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.4)),
+            ),
+          ] else if (_prowlarrAvailableTags.isEmpty) ...[
+            Text(
+              'No tags found in Prowlarr. Add tags to your indexers to use this filter.',
+              style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.4)),
+            ),
+          ] else ...[
             Text(
               'Limit searches to indexers with the selected tags. Leave all unselected to search all indexers.',
               style: TextStyle(fontSize: 12, color: Colors.white.withValues(alpha: 0.6)),
