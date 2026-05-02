@@ -2,7 +2,7 @@ name: play_torrio_native
 description: "PlayTorrio - Your cinema universe, Stream anything, anywhere."
 publish_to: 'none'
 
-version: 1.2.2+23
+version: 1.2.3+24
 
 environment:
   sdk: ^3.11.0
@@ -48,7 +48,7 @@ dependencies:
   archive: ^4.0.4
   package_info_plus: ^9.0.0
   ota_update: ^7.1.0
-  libtorrent_flutter: 1.8.2
+  libtorrent_flutter: 1.8.5
   file_picker: ^8.0.0+1
   palette_generator: ^0.3.3+4
   pointycastle: ^3.9.1
