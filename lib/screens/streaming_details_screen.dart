@@ -6,6 +6,8 @@ import '../api/tmdb_api.dart';
 import '../api/stream_extractor.dart';
 import '../api/stremio_service.dart';
 import '../api/stream_providers.dart';
+import '../api/nuvio_service.dart';
+import '../models/stream_source.dart';
 import '../api/webstreamr_service.dart';
 import '../api/site111477_service.dart';
 import '../api/site111477_proxy.dart' as site111477_proxy;
@@ -66,7 +68,9 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
   final ScrollController _episodeScrollController = ScrollController();
   final ScrollController _seasonScrollController = ScrollController();
 
-  final Map<String, dynamic> _providers = StreamProviders.providers;
+  final Map<String, dynamic> _providers = <String, dynamic>{
+    ...StreamProviders.providers,
+  };
   final SettingsService _settings = SettingsService();
 
   @override
@@ -79,7 +83,18 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
     final url = (_movie.posterPath.isNotEmpty ? _movie.posterPath : _movie.backdropPath);
     loadAtmosphere(url.startsWith('http') ? url : TmdbApi.getImageUrl(url));
     _loadWatchedEpisodes();
+    _loadNuvioProviders();
     _fetchDetails();
+  }
+
+  Future<void> _loadNuvioProviders() async {
+    try {
+      final entries = await NuvioService.instance.getProviderEntries();
+      if (!mounted || entries.isEmpty) return;
+      setState(() => _providers.addAll(entries));
+    } catch (e) {
+      debugPrint('[StreamingDetails] nuvio provider load failed: $e');
+    }
   }
 
   Future<void> _fetchDetails() async {
@@ -400,6 +415,43 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
       return true;
     }
 
+    // Nuvio scrapers — `nuvio:<scraperId>`. Each entry is one provider in
+    // the user's priority list, so we run a SINGLE scraper here (not all of
+    // them like the regular details screen does). The first stream becomes
+    // the primary; the rest become entries in the player's multi-link menu.
+    if (key.startsWith('nuvio:')) {
+      final scraperId = key.substring(6);
+      final results = await NuvioService.instance.runOneScraper(
+        scraperId: scraperId,
+        tmdbId: _movie.id.toString(),
+        type: isTv ? 'tv' : 'movie',
+        season: isTv ? _selectedSeason : null,
+        episode: isTv ? _selectedEpisode : null,
+      );
+      if (_extractionCancelled || results.isEmpty || !mounted) return false;
+      final first = results.first;
+      final sources = results.map((r) => StreamSource(
+            url: r.url,
+            title: r.title.isNotEmpty ? r.title : r.name,
+            type: _typeFromUrl(r.url),
+            headers: r.headers.isEmpty ? null : r.headers,
+          )).toList();
+      final subtitles = first.subtitles
+          .where((s) => (s['url'] ?? '').isNotEmpty)
+          .map((s) => <String, dynamic>{
+                'url': s['url']!,
+                'lang': s['lang'] ?? 'Unknown',
+              })
+          .toList();
+      pushPlayer(
+        streamUrl: first.url,
+        headers: first.headers.isEmpty ? null : first.headers,
+        sources: sources,
+        subtitles: subtitles,
+      );
+      return true;
+    }
+
     // Generic web-embed providers (vidlink/vixsrc/vidnest/…).
     final provider = orderedProviders[key];
     if (provider == null ||
@@ -427,6 +479,14 @@ class _StreamingDetailsScreenState extends State<StreamingDetailsScreen> with At
       subtitles: result.externalSubtitles,
     );
     return true;
+  }
+
+  String _typeFromUrl(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('.m3u8')) return 'hls';
+    if (u.contains('.mpd')) return 'dash';
+    if (u.contains('.mkv')) return 'mkv';
+    return 'mp4';
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

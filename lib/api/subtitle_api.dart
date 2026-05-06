@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'local_server_service.dart';
+import 'mysubs_service.dart';
 import 'settings_service.dart';
 import 'stremio_service.dart';
 import 'subtitlecat_service.dart';
@@ -56,6 +57,12 @@ class SubtitleApi {
     // SubtitleCat (scraping + on-demand Google translation)
     if (title != null && title.trim().isNotEmpty) {
       tasks.add(_fetchSubtitleCat(
+        title: title,
+        year: year,
+        season: season,
+        episode: episode,
+      ));
+      tasks.add(_fetchMysubs(
         title: title,
         year: year,
         season: season,
@@ -129,8 +136,8 @@ class SubtitleApi {
 
   static Future<List<Map<String, dynamic>>> _fetchWyzie(int tmdbId, int? season, int? episode) async {
     try {
-      const wyzieKey = 'wyzie-0d7ef784cd5aa6b812766fb07931accb';
-      String url = 'https://sub.wyzie.ru/search?id=$tmdbId&key=$wyzieKey';
+      const wyzieKey = 'wyzie-0321082ab89b43b9834233ee524cc725';
+      String url = 'https://sub.wyzie.io/search?id=$tmdbId&key=$wyzieKey';
       if (season != null && episode != null) {
         url += '&season=$season&episode=$episode';
       }
@@ -223,7 +230,24 @@ class SubtitleApi {
   }
 
   // ── SubtitleCat ────────────────────────────────────────────────────────────
-
+  static Future<List<Map<String, dynamic>>> _fetchMysubs({
+    required String title,
+    int? year,
+    int? season,
+    int? episode,
+  }) async {
+    try {
+      return await MysubsService.instance.fetchAll(
+        title: title,
+        year: year,
+        season: season,
+        episode: episode,
+      );
+    } catch (e) {
+      debugPrint('mysubs fetch error: $e');
+      return [];
+    }
+  }
   static Future<List<Map<String, dynamic>>> _fetchSubtitleCat({
     required String title,
     int? year,

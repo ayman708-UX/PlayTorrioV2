@@ -83,17 +83,21 @@ class _SimilarHubScreenState extends State<SimilarHubScreen>
 
   Future<void> _runSearch(String q) async {
     if (q.isEmpty) {
-      if (mounted) setState(() {
-        _query = '';
-        _results = const [];
-        _loading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _query = '';
+          _results = const [];
+          _loading = false;
+        });
+      }
       return;
     }
-    if (mounted) setState(() {
-      _query = q;
-      _loading = true;
-    });
+    if (mounted) {
+      setState(() {
+        _query = q;
+        _loading = true;
+      });
+    }
     try {
       List<Movie> hits;
       switch (_filter) {
@@ -166,8 +170,8 @@ class _SimilarHubScreenState extends State<SimilarHubScreen>
     return PageRouteBuilder(
       transitionDuration: const Duration(milliseconds: 460),
       reverseTransitionDuration: const Duration(milliseconds: 320),
-      pageBuilder: (_, __, ___) => child,
-      transitionsBuilder: (_, anim, __, ch) {
+      pageBuilder: (_, _, _) => child,
+      transitionsBuilder: (_, anim, _, ch) {
         final curved =
             CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
         return FadeTransition(
@@ -195,7 +199,7 @@ class _SimilarHubScreenState extends State<SimilarHubScreen>
           Positioned.fill(
             child: AnimatedBuilder(
               animation: _blobCtrl,
-              builder: (_, __) => CustomPaint(
+              builder: (_, _) => CustomPaint(
                 painter: _LiquidBlobsPainter(_blobCtrl.value),
               ),
             ),
@@ -554,10 +558,10 @@ class _PosterCardState extends State<_PosterCard> {
                                 fit: BoxFit.cover,
                                 fadeInDuration:
                                     const Duration(milliseconds: 320),
-                                placeholder: (_, __) => Container(
+                                placeholder: (_, _) => Container(
                                     color: Colors.white
                                         .withValues(alpha: 0.04)),
-                                errorWidget: (_, __, ___) =>
+                                errorWidget: (_, _, _) =>
                                     _posterFallback(),
                               )
                             : _posterFallback(),

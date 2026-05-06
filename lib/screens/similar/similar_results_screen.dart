@@ -288,7 +288,7 @@ class _SimilarResultsScreenState extends State<SimilarResultsScreen>
                             TmdbApi.getBackdropUrl(widget.seedBackdrop),
                         fit: BoxFit.cover,
                         fadeInDuration: const Duration(milliseconds: 500),
-                        placeholder: (_, __) =>
+                        placeholder: (_, _) =>
                             Container(color: _ambient),
                       ),
                     ),
@@ -609,10 +609,10 @@ class _SimilarBigCard extends StatelessWidget {
                             fit: BoxFit.cover,
                             fadeInDuration:
                                 const Duration(milliseconds: 380),
-                            placeholder: (_, __) => Container(
+                            placeholder: (_, _) => Container(
                                 color:
                                     Colors.white.withValues(alpha: 0.06)),
-                            errorWidget: (_, __, ___) => Container(
+                            errorWidget: (_, _, _) => Container(
                               color: const Color(0xFF1A1F2C),
                               child: const Icon(Icons.movie_outlined,
                                   color: Colors.white24, size: 28),
@@ -779,7 +779,7 @@ class _SimilarityRing extends StatelessWidget {
       tween: Tween(begin: 0, end: percent / 100),
       duration: const Duration(milliseconds: 900),
       curve: Curves.easeOutCubic,
-      builder: (_, v, __) {
+      builder: (_, v, _) {
         return SizedBox(
           width: 44,
           height: 44,

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -9,6 +10,7 @@ import '../models/torrent_result.dart';
 import '../api/torrent_api.dart';
 import '../api/torrent_stream_service.dart';
 import '../api/stremio_service.dart';
+import '../api/nuvio_service.dart';
 import '../api/torrent_filter.dart';
 import '../api/settings_service.dart';
 import '../api/debrid_api.dart';
@@ -72,6 +74,23 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
   /// Tracks which addon baseUrls have returned results (for dynamic chip display).
   final Set<String> _loadedAddonBaseUrls = {};
 
+  // Nuvio addon results — kept independent from Stremio addons so the UI
+  // can show them under their own tab.
+  List<Map<String, dynamic>> _nuvioStreams = [];
+  bool _isNuvioFetching = false;
+  bool _hasNuvioAddons = false;
+  StreamSubscription<NuvioScraperResult>? _nuvioSub;
+  /// Cached list of installed Nuvio addons (refreshed when the Nuvio tab
+  /// is opened). Used to render the addon-picker chips.
+  List<NuvioAddon> _nuvioAddons = [];
+  /// Manifest URL of the addon the user has drilled into. `null` means
+  /// we're showing the addon-picker chips. Once non-null, scraper chips
+  /// for that addon are rendered.
+  String? _nuvioSelectedAddonUrl;
+  /// Scraper id (`<scraperId>`) the user picked. Drives `_selectedSourceId`
+  /// (`'nuvio:<scraperId>'`) and the active stream list.
+  String? _nuvioSelectedScraperId;
+
   int _selectedSeason = 1;
   int _selectedEpisode = 1;
   Map<String, dynamic>? _seasonData;
@@ -102,6 +121,7 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
 
   final ScrollController _episodeScrollController = ScrollController();
   final ScrollController _seasonScrollController = ScrollController();
+  final ScrollController _chipsScrollController = ScrollController();
   final FocusNode _keyboardFocusNode = FocusNode();
 
   // MDBlist aggregated ratings
@@ -140,11 +160,13 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
     _keyboardFocusNode.dispose();
     _episodeScrollController.dispose();
     _seasonScrollController.dispose();
+    _chipsScrollController.dispose();
     _recommendationsScrollController.dispose();
     _castScrollController.dispose();
     _jackett.dispose();
     _prowlarr.dispose();
     _linkResolver.dispose();
+    _nuvioSub?.cancel();
     super.dispose();
   }
 
@@ -311,12 +333,29 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
         });
         _autoSearch();
         _fetchAllStremioStreams();
+        _checkAndFetchNuvio();
         _fetchStremioRecommendations();
         _fetchCastMembers();
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  /// Probes installed Nuvio addons and exposes the "Nuvio Addons" tab if
+  /// any are enabled. Does NOT kick off scraping — that happens lazily
+  /// when the user actually clicks an addon → a scraper.
+  Future<void> _checkAndFetchNuvio() async {
+    try {
+      final addons = await NuvioService.instance.listUserAddons();
+      final hasEnabled = addons.any((a) => a.scrapers.any((s) => s.enabled));
+      if (!mounted) return;
+      setState(() {
+        _hasNuvioAddons = hasEnabled;
+        _nuvioAddons = addons.where((a) =>
+            a.scrapers.any((s) => s.enabled)).toList();
+      });
+    } catch (_) {}
   }
 
   Future<void> _fetchCastMembers() async {
@@ -813,6 +852,8 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
           _searchProwlarr();
         } else if (_selectedSourceId == 'all_stremio') {
           _fetchAllStremioStreams();
+        } else if (_isNuvioSource) {
+          _fetchAllNuvioStreams();
         } else {
           _fetchStremioStreams();
         }
@@ -844,7 +885,7 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       _errorMessage = null;
       _allCombinedStremioStreams = [];
       _loadedAddonBaseUrls.clear();
-      if (!_isTorrentSource) _stremioStreams = [];
+      if (_selectedSourceId == 'all_stremio') _stremioStreams = [];
     });
     try {
       String stremioId = _movie.imdbId ?? '';
@@ -856,6 +897,20 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       final type = _movie.mediaType == 'tv' ? 'series' : 'movie';
 
       int pendingCount = _streamAddons.length;
+
+      void completeOne() {
+        if (!mounted) return;
+        pendingCount--;
+        if (pendingCount <= 0) {
+          setState(() {
+            _isStremioFetching = false;
+            if (_allCombinedStremioStreams.isEmpty &&
+                _selectedSourceId == 'all_stremio') {
+              _errorMessage = 'No streams found from any addon';
+            }
+          });
+        }
+      }
 
       for (final addon in _streamAddons) {
         // Fire each addon fetch independently — don't await here
@@ -879,26 +934,125 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
             }
             // Append below existing results
             _allCombinedStremioStreams.addAll(tagged);
-            if (!_isTorrentSource) _applyStremioFilter();
+            if (_selectedSourceId == 'all_stremio' ||
+                _selectedSourceId == addon['baseUrl']) {
+              _applyStremioFilter();
+            }
           });
         }).catchError((_) {
           // No-op: don't show chip for errored addons
         }).whenComplete(() {
-          if (!mounted) return;
-          pendingCount--;
-          if (pendingCount <= 0) {
-            setState(() {
-              _isStremioFetching = false;
-              if (_allCombinedStremioStreams.isEmpty && !_isTorrentSource) {
-                _errorMessage = 'No streams found from any addon';
-              }
-            });
-          }
+          completeOne();
         });
       }
     } catch (e) {
       if (mounted) setState(() { _errorMessage = 'Error: $e'; _isStremioFetching = false; });
     }
+  }
+
+  /// Runs ONE Nuvio scraper on demand and replaces `_nuvioStreams` with its
+  /// results. Triggered when the user taps a scraper chip — keeps the
+  /// details page snappy by avoiding the parallel-everything fetch.
+  Future<void> _runSingleNuvioScraper(String scraperId) async {
+    if (_movie.id <= 0) return;
+    await _nuvioSub?.cancel();
+    _nuvioSub = null;
+    setState(() {
+      _isNuvioFetching = true;
+      _nuvioStreams = [];
+      _errorMessage = null;
+    });
+    final type = _movie.mediaType == 'tv' ? 'tv' : 'movie';
+    try {
+      final results = await NuvioService.instance.runOneScraper(
+        scraperId: scraperId,
+        tmdbId: _movie.id.toString(),
+        type: type,
+        season: _movie.mediaType == 'tv' ? _selectedSeason : null,
+        episode: _movie.mediaType == 'tv' ? _selectedEpisode : null,
+      );
+      if (!mounted) return;
+      // Resolve the human-readable scraper name for tagging.
+      String scraperName = scraperId;
+      for (final a in _nuvioAddons) {
+        for (final s in a.scrapers) {
+          if (s.id == scraperId) { scraperName = s.name; break; }
+        }
+      }
+      setState(() {
+        _nuvioStreams = results
+            .map((r) => <String, dynamic>{
+                  ...r.toStremioStream(sourceLabel: scraperName),
+                  '_addonName': scraperName,
+                  '_addonBaseUrl': 'nuvio:$scraperId',
+                })
+            .toList();
+        _isNuvioFetching = false;
+        _errorMessage = _nuvioStreams.isEmpty
+            ? 'No streams found from $scraperName'
+            : null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isNuvioFetching = false;
+        _errorMessage = 'Error: $e';
+      });
+    }
+  }
+
+  /// Fetches streams from every enabled Nuvio scraper in parallel and
+  /// appends results in real time as each scraper completes — so chips and
+  /// streams light up the UI progressively instead of waiting for the
+  /// slowest provider. Re-entrant: a fresh call cancels the previous
+  /// subscription and resets the visible list.
+  Future<void> _fetchAllNuvioStreams() async {
+    if (!_hasNuvioAddons || _movie.id <= 0) return;
+    // Tear down any previous in-flight stream — e.g. user switched
+    // season/episode mid-fetch.
+    await _nuvioSub?.cancel();
+    _nuvioSub = null;
+    setState(() {
+      _isNuvioFetching = true;
+      _nuvioStreams = [];
+      if (_selectedSourceId == 'all_nuvio') _errorMessage = null;
+    });
+    final type = _movie.mediaType == 'tv' ? 'tv' : 'movie';
+    final stream = NuvioService.instance.streamAll(
+      tmdbId: _movie.id.toString(),
+      type: type,
+      season: _movie.mediaType == 'tv' ? _selectedSeason : null,
+      episode: _movie.mediaType == 'tv' ? _selectedEpisode : null,
+    );
+    _nuvioSub = stream.listen(
+      (batch) {
+        if (!mounted) return;
+        if (batch.streams.isEmpty) return; // failed/empty scrapers add nothing
+        setState(() {
+          _nuvioStreams.addAll(batch.streams.map((s) => <String, dynamic>{
+                ...s,
+                '_addonName': s['sourceName'] ?? batch.scraperName,
+                '_addonBaseUrl':
+                    'nuvio://${s['sourceName'] ?? batch.scraperId}',
+              }));
+          if (_selectedSourceId == 'all_nuvio') _errorMessage = null;
+        });
+      },
+      onError: (e) {
+        debugPrint('[DetailsScreen] Nuvio stream error: $e');
+      },
+      onDone: () {
+        _nuvioSub = null;
+        if (!mounted) return;
+        setState(() {
+          _isNuvioFetching = false;
+          if (_selectedSourceId == 'all_nuvio' && _nuvioStreams.isEmpty) {
+            _errorMessage = 'No streams found from any Nuvio addon';
+          }
+        });
+      },
+      cancelOnError: false,
+    );
   }
 
   /// Fetches streams using the custom Stremio ID from the originating addon.
@@ -1953,8 +2107,9 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
 
   Widget _buildMobileHero() {
     final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final heroHeight = isLandscape ? 240.0 : 360.0;
     return SizedBox(
-      height: isLandscape ? 200 : 260,
+      height: heroHeight,
       child: Stack(
         children: [
           Positioned.fill(
@@ -1962,8 +2117,11 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
               shaderCallback: (rect) => const LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
+                // Hold the image strong for the top 60%, then fade it out
+                // smoothly so the backdrop blends into the page background
+                // instead of getting hard-cropped at the bottom.
                 colors: [Colors.white, Colors.white, Colors.transparent],
-                stops: [0.0, 0.5, 1.0],
+                stops: [0.0, 0.6, 1.0],
               ).createShader(rect),
               blendMode: BlendMode.dstIn,
               child: CachedNetworkImage(
@@ -1974,13 +2132,20 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
               ),
             ),
           ),
+          // Soft tint + bottom fade to black so text on top of the hero stays
+          // readable and the seam against the page body disappears.
           Positioned.fill(
             child: Container(
               decoration: const BoxDecoration(gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [Color(0x33000000), Color(0xCC000000), Color(0xFF000000)],
-                stops: [0.0, 0.65, 1.0],
+                colors: [
+                  Color(0x22000000),
+                  Color(0x55000000),
+                  Color(0xCC000000),
+                  Color(0xFF000000),
+                ],
+                stops: [0.0, 0.45, 0.8, 1.0],
               )),
             ),
           ),
@@ -2329,6 +2494,10 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
                     _searchProwlarr();
                   } else if (_selectedSourceId == 'all_stremio') {
                     _fetchAllStremioStreams();
+                  } else if (_isNuvioSource) {
+                    if (_nuvioSelectedScraperId != null) {
+                      _runSingleNuvioScraper(_nuvioSelectedScraperId!);
+                    }
                   } else {
                     // For custom IDs, re-fetch streams with the new episode
                     if (widget.stremioItem != null) {
@@ -2420,8 +2589,21 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       _selectedSourceId == 'jackett' ||
       _selectedSourceId == 'prowlarr';
 
+  bool get _isNuvioSource =>
+      _selectedSourceId == 'nuvio_picker' ||
+      _selectedSourceId == 'all_nuvio' ||
+      _selectedSourceId.startsWith('nuvio:') ||
+      _selectedSourceId.startsWith('nuvio://');
+
   Widget _buildSourceToggle() {
     final isTorrent = _isTorrentSource;
+    final isNuvio = _isNuvioSource;
+    final isStremio = !isTorrent && !isNuvio;
+    // On narrow phones the three labelled tabs would push past the screen
+    // edge — stretch each tab to share the row equally and shrink the
+    // label/icon so nothing overflows the rounded container.
+    final w = MediaQuery.of(context).size.width;
+    final compact = w < 420;
     return Container(
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.06),
@@ -2430,9 +2612,9 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       ),
       padding: const EdgeInsets.all(4),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
         children: [
-          _sourceTab('Stremio Addons', Icons.extension_outlined, !isTorrent, () {
+          Expanded(
+            child: _sourceTab('Stremio Addons', Icons.extension_outlined, isStremio, compact, () {
             if (_streamAddons.isNotEmpty) {
               setState(() {
                 _selectedSourceId = 'all_stremio';
@@ -2443,37 +2625,69 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
               if (_allCombinedStremioStreams.isEmpty) _fetchAllStremioStreams();
             }
           }),
-          _sourceTab('Torrent Sources', Icons.downloading_rounded, isTorrent, () {
+          ),
+          if (_hasNuvioAddons)
+            Expanded(
+              child: _sourceTab('Nuvio Addons', Icons.code_rounded, isNuvio, compact, () {
+              setState(() {
+                _selectedSourceId = 'nuvio_picker';
+                _nuvioSelectedAddonUrl = null;
+                _nuvioSelectedScraperId = null;
+                _nuvioStreams = [];
+                _errorMessage = null;
+              });
+              // Refresh the addon list lazily in case the user just
+              // installed/enabled something.
+              _checkAndFetchNuvio();
+            }),
+            ),
+          Expanded(
+            child: _sourceTab('Torrent Sources', Icons.downloading_rounded, isTorrent, compact, () {
             setState(() => _selectedSourceId = 'playtorrio');
             _autoSearch();
           }),
+          ),
         ],
       ),
     );
   }
 
-  Widget _sourceTab(String label, IconData icon, bool selected, VoidCallback onTap) {
+  Widget _sourceTab(String label, IconData icon, bool selected, bool compact, VoidCallback onTap) {
+    // "Stremio Addons" / "Torrent Sources" are too wide for ~360-400dp
+    // phones. Use a shorter label in compact mode and a FittedBox so any
+    // remaining overflow gracefully shrinks rather than clipping.
+    final shortLabel = compact
+        ? (label.startsWith('Stremio')
+            ? 'Stremio'
+            : label.startsWith('Nuvio')
+                ? 'Nuvio'
+                : 'Torrent')
+        : label;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 14, vertical: 8),
         decoration: BoxDecoration(
           color: selected ? AppTheme.primaryColor : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
         ),
-        child: Row(children: [
-          Icon(icon, size: 14, color: selected ? Colors.white : Colors.white54),
-          const SizedBox(width: 5),
-          Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-            color: selected ? Colors.white : Colors.white54)),
-        ]),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 14, color: selected ? Colors.white : Colors.white54),
+            const SizedBox(width: 5),
+            Text(shortLabel, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+              color: selected ? Colors.white : Colors.white54)),
+          ]),
+        ),
       ),
     );
   }
 
   Widget _buildSourceChips() {
     final isTorrent = _isTorrentSource;
+    final isNuvio = _isNuvioSource;
     final chips = <Map<String, dynamic>>[];
     if (isTorrent) {
       chips.add({'id': 'playtorrio', 'label': 'PlayTorrio'});
@@ -2481,6 +2695,34 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       if (_isProwlarrConfigured) chips.add({'id': 'prowlarr', 'label': '🔍 Prowlarr'});
       for (final a in _streamAddons) {
         if (a['type'] == 'torrent') chips.add({'id': a['baseUrl'], 'label': a['name']});
+      }
+    } else if (isNuvio) {
+      // Two-level navigation:
+      //   Level 0 — addon picker: one chip per installed addon.
+      //   Level 1 — scraper picker: a "Back" chip + one chip per enabled
+      //             scraper inside the chosen addon.
+      // No scraping happens until the user actually taps a scraper chip.
+      if (_nuvioSelectedAddonUrl == null) {
+        for (final a in _nuvioAddons) {
+          chips.add({
+            'id': 'nuvio_addon::${a.manifestUrl}',
+            'label': '📦 ${a.name}',
+          });
+        }
+      } else {
+        chips.add({'id': 'nuvio_back', 'label': '← Addons'});
+        final addon = _nuvioAddons.firstWhere(
+          (a) => a.manifestUrl == _nuvioSelectedAddonUrl,
+          orElse: () => NuvioAddon(
+              manifestUrl: _nuvioSelectedAddonUrl!,
+              name: '',
+              version: '',
+              scrapers: const []),
+        );
+        for (final s in addon.scrapers) {
+          if (!s.enabled) continue;
+          chips.add({'id': 'nuvio:${s.id}', 'label': s.name});
+        }
       }
     } else {
       // "All" chip shows combined streams from every addon
@@ -2495,16 +2737,66 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       }
     }
     if (chips.isEmpty) return const SizedBox.shrink();
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: chips.map((chip) {
-          final sel = _selectedSourceId == chip['id'];
+    return Row(
+      children: [
+        _scrollArrow(Icons.arrow_back_ios_rounded, () => _chipsScrollController.animateTo(
+          (_chipsScrollController.offset - 160).clamp(0.0, _chipsScrollController.position.maxScrollExtent),
+          duration: const Duration(milliseconds: 280), curve: Curves.easeInOut)),
+        Expanded(
+          child: SingleChildScrollView(
+            controller: _chipsScrollController,
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: chips.map((chip) {
+          final id = chip['id'] as String;
+          // Selection rules for the new Nuvio drill-down:
+          //   - addon-picker chip: selected when its addon is the active one
+          //   - back chip: never visually selected
+          //   - scraper chip: selected when its scraperId matches
+          //   - everything else: legacy `_selectedSourceId` match
+          final bool sel;
+          if (id.startsWith('nuvio_addon::')) {
+            sel = _nuvioSelectedAddonUrl ==
+                id.substring('nuvio_addon::'.length);
+          } else if (id == 'nuvio_back') {
+            sel = false;
+          } else {
+            sel = _selectedSourceId == id;
+          }
           return Padding(
             padding: const EdgeInsets.only(right: 8),
             child: GestureDetector(
               onTap: () {
-                final id = chip['id'] as String;
+                if (id.startsWith('nuvio_addon::')) {
+                  setState(() {
+                    _nuvioSelectedAddonUrl =
+                        id.substring('nuvio_addon::'.length);
+                    _nuvioSelectedScraperId = null;
+                    _selectedSourceId = 'nuvio_picker';
+                    _nuvioStreams = [];
+                    _errorMessage = null;
+                  });
+                  return;
+                }
+                if (id == 'nuvio_back') {
+                  setState(() {
+                    _nuvioSelectedAddonUrl = null;
+                    _nuvioSelectedScraperId = null;
+                    _selectedSourceId = 'nuvio_picker';
+                    _nuvioStreams = [];
+                    _errorMessage = null;
+                  });
+                  return;
+                }
+                if (id.startsWith('nuvio:')) {
+                  final scraperId = id.substring('nuvio:'.length);
+                  setState(() {
+                    _selectedSourceId = id;
+                    _nuvioSelectedScraperId = scraperId;
+                  });
+                  _runSingleNuvioScraper(scraperId);
+                  return;
+                }
                 setState(() => _selectedSourceId = id);
                 if (id == 'playtorrio') {
                   _autoSearch();
@@ -2517,6 +2809,10 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
                     _applyStremioFilter();
                     _errorMessage = _stremioStreams.isEmpty && !_isStremioFetching
                         ? 'No streams found from any addon' : null;
+                  });
+                } else if (id == 'all_nuvio' || id.startsWith('nuvio://')) {
+                  setState(() {
+                    _errorMessage = null;
                   });
                 } else {
                   // Single addon filter from cached combined results
@@ -2541,8 +2837,14 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
               ),
             ),
           );
-        }).toList(),
-      ),
+              }).toList(),
+            ),
+          ),
+        ),
+        _scrollArrow(Icons.arrow_forward_ios_rounded, () => _chipsScrollController.animateTo(
+          (_chipsScrollController.offset + 160).clamp(0.0, _chipsScrollController.position.maxScrollExtent),
+          duration: const Duration(milliseconds: 280), curve: Curves.easeInOut)),
+      ],
     );
   }
 
@@ -2569,7 +2871,7 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
           const SizedBox(width: 6),
           Text('— $epLabel', style: const TextStyle(color: Colors.white38, fontSize: 12)),
         ],
-        if (_isSearching || _isStremioFetching) ...[
+        if (_isSearching || _isStremioFetching || _isNuvioFetching) ...[
           const SizedBox(width: 8),
           const SizedBox(width: 12, height: 12,
             child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryColor)),
@@ -2673,11 +2975,33 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
       );
     }
     final isTorrent = _isTorrentSource;
-    final count = isTorrent ? _filteredTorrentResults.length : _stremioStreams.length;
-    if (!_isSearching && !_isStremioFetching && count == 0) {
-      final msg = (isTorrent && _activeAudioFilters.isNotEmpty && _allTorrentResults.isNotEmpty)
-          ? 'No results match the audio filter'
-          : 'No streams found';
+    final isNuvio = _isNuvioSource;
+    // Pick the active stream list based on the source tab.
+    final List<dynamic> visibleStreams = isNuvio
+        ? (_selectedSourceId == 'all_nuvio'
+            ? _nuvioStreams
+            : (_selectedSourceId.startsWith('nuvio:')
+                ? _nuvioStreams
+                    .where((s) =>
+                        s['_addonBaseUrl'] == _selectedSourceId)
+                    .toList()
+                : <dynamic>[]))
+        : _stremioStreams;
+    final count = isTorrent ? _filteredTorrentResults.length : visibleStreams.length;
+    final isFetching = isTorrent
+        ? _isSearching
+        : (isNuvio ? _isNuvioFetching : _isStremioFetching);
+    if (!_isSearching && !isFetching && count == 0) {
+      String msg;
+      if (isTorrent && _activeAudioFilters.isNotEmpty && _allTorrentResults.isNotEmpty) {
+        msg = 'No results match the audio filter';
+      } else if (isNuvio && _nuvioSelectedScraperId == null) {
+        msg = _nuvioSelectedAddonUrl == null
+            ? 'Pick an addon to see its providers'
+            : 'Pick a provider to fetch streams';
+      } else {
+        msg = 'No streams found';
+      }
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 24),
         child: Center(child: Text(msg, style: const TextStyle(color: Colors.white38))),
@@ -2701,7 +3025,7 @@ class _DetailsScreenState extends State<DetailsScreen> with AtmosphereMixin {
           }
           return _buildTorrentTile(r, progress: prog, isResumable: resumable);
         } else {
-          final s = _stremioStreams[i];
+          final s = visibleStreams[i];
           double prog = 0; bool resumable = false;
           if (_lastProgress != null) {
             final String? sid = s['infoHash'] != null

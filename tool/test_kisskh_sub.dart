@@ -1,3 +1,4 @@
+// ignore_for_file: avoid_print
 // Standalone test - no flutter deps.
 import 'dart:convert';
 import 'dart:typed_data';

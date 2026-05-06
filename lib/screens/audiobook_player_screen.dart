@@ -1,5 +1,6 @@
 import 'dart:ui';
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../api/audiobook_service.dart';
@@ -81,17 +82,12 @@ class _AudiobookPlayerScreenState extends State<AudiobookPlayerScreen> {
           children: [
             // Subtle background blur
             Positioned.fill(
-              child: CachedNetworkImage(
-                imageUrl: widget.audiobook.thumbUrl,
+              child: _buildCoverImage(
+                widget.audiobook.thumbUrl,
+                fallbackUrl: widget.audiobook.coverImage,
                 fit: BoxFit.cover,
                 color: Colors.black.withValues(alpha: 0.6),
                 colorBlendMode: BlendMode.darken,
-                errorWidget: (context, url, error) => CachedNetworkImage(
-                  imageUrl: widget.audiobook.coverImage,
-                  fit: BoxFit.cover,
-                  color: Colors.black.withValues(alpha: 0.6),
-                  colorBlendMode: BlendMode.darken,
-                ),
               ),
             ),
             Positioned.fill(
@@ -240,13 +236,49 @@ class _AudiobookPlayerScreenState extends State<AudiobookPlayerScreen> {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(24),
-          child: CachedNetworkImage(
-            imageUrl: widget.audiobook.thumbUrl,
+          child: _buildCoverImage(
+            widget.audiobook.thumbUrl,
+            fallbackUrl: widget.audiobook.coverImage,
             fit: BoxFit.cover,
-            errorWidget: (context, url, error) => CachedNetworkImage(imageUrl: widget.audiobook.coverImage, fit: BoxFit.cover),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildCoverImage(String url,
+      {String? fallbackUrl, BoxFit fit = BoxFit.cover, Color? color, BlendMode? colorBlendMode}) {
+    bool isLocal(String s) => s.isNotEmpty && !s.startsWith('http://') && !s.startsWith('https://');
+    if (isLocal(url)) {
+      final f = File(url);
+      if (f.existsSync()) {
+        return Image.file(f, fit: fit, color: color, colorBlendMode: colorBlendMode);
+      }
+    }
+    return CachedNetworkImage(
+      imageUrl: url,
+      fit: fit,
+      color: color,
+      colorBlendMode: colorBlendMode,
+      errorWidget: (context, _, _) {
+        if (fallbackUrl == null || fallbackUrl.isEmpty) {
+          return Container(color: Colors.white10);
+        }
+        if (isLocal(fallbackUrl)) {
+          final f = File(fallbackUrl);
+          if (f.existsSync()) {
+            return Image.file(f, fit: fit, color: color, colorBlendMode: colorBlendMode);
+          }
+          return Container(color: Colors.white10);
+        }
+        return CachedNetworkImage(
+          imageUrl: fallbackUrl,
+          fit: fit,
+          color: color,
+          colorBlendMode: colorBlendMode,
+          errorWidget: (_, _, _) => Container(color: Colors.white10),
+        );
+      },
     );
   }
 

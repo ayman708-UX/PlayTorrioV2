@@ -24,6 +24,7 @@ import '../../api/simkl_service.dart';
 import '../../api/torrent_stream_service.dart';
 import '../../api/stream_extractor.dart';
 import '../../api/videasy_extractor.dart';
+import '../../api/nuvio_service.dart';
 import '../../api/vidsrc_extractor.dart';
 import '../../api/webstreamr_service.dart';
 import '../../api/site111477_service.dart';
@@ -32,6 +33,7 @@ import '../../api/arabic_service.dart';
 import '../../api/stremio_service.dart';
 import '../../api/stream_providers.dart';
 import '../../api/settings_service.dart';
+import '../../api/track_auto_select.dart';
 import '../../api/debrid_api.dart';
 import '../../api/torrent_api.dart';
 import '../../api/torrent_filter.dart';
@@ -458,6 +460,8 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
   StreamSubscription<bool>? _bufferingSub;
   StreamSubscription<String>? _errorSub;
   StreamSubscription<bool>? _completedSub;
+  StreamSubscription<Tracks>? _tracksSub;
+  bool _autoTracksAppliedForSource = false;
 
   // ── Value Notifiers ───────────────────────────────────────────────────────
   final ValueNotifier<Duration> _positionNotifier =
@@ -684,6 +688,7 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
     _bufferingSub?.cancel();
     _errorSub?.cancel();
     _completedSub?.cancel();
+    _tracksSub?.cancel();
 
     _positionNotifier.dispose();
     _durationNotifier.dispose();
@@ -1074,6 +1079,30 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
           headers = result.headers;
           sources = result.sources;
         }
+      } else if (newProvider.startsWith('nuvio:') && widget.movie != null) {
+        final scraperId = newProvider.substring(6);
+        final results = await NuvioService.instance.runOneScraper(
+          scraperId: scraperId,
+          tmdbId: widget.movie!.id.toString(),
+          type: widget.movie!.mediaType == 'tv' ? 'tv' : 'movie',
+          season: widget.selectedSeason,
+          episode: widget.selectedEpisode,
+        );
+        if (results.isNotEmpty) {
+          final first = results.first;
+          streamUrl = first.url;
+          headers = first.headers.isEmpty ? null : first.headers;
+          sources = results.map((r) => StreamSource(
+                url: r.url,
+                title: r.title.isNotEmpty ? r.title : r.name,
+                type: r.url.toLowerCase().contains('.m3u8')
+                    ? 'hls'
+                    : r.url.toLowerCase().contains('.mpd')
+                        ? 'dash'
+                        : 'mp4',
+                headers: r.headers.isEmpty ? null : r.headers,
+              )).toList();
+        }
       } else if (provider['movie'] != null && provider['tv'] != null) {
         final String providerUrl;
         if (widget.movie!.mediaType == 'tv') {
@@ -1132,6 +1161,8 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
     _bufferingSub?.cancel();
     _errorSub?.cancel();
     _completedSub?.cancel();
+    _tracksSub?.cancel();
+    _autoTracksAppliedForSource = false;
 
     _positionSub = _player.stream.position.listen((pos) {
       if (_disposed) return;
@@ -1273,6 +1304,42 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
       // Show controls when playback finishes so user can navigate away
       if (mounted) setState(() => _showControls = true);
     });
+
+    _tracksSub = _player.stream.tracks.listen((tracks) {
+      if (_disposed || _autoTracksAppliedForSource) return;
+      // Only run once we have at least one real audio track to choose from.
+      final hasAudio = tracks.audio.any((t) => t.id != 'no' && t.id != 'auto');
+      if (!hasAudio) return;
+      _autoTracksAppliedForSource = true;
+      // Defer slightly so mpv has finished probing all tracks/metadata.
+      Future.delayed(const Duration(milliseconds: 600), _applyTrackAutoSelect);
+    });
+  }
+
+  Future<void> _applyTrackAutoSelect() async {
+    if (_disposed) return;
+    try {
+      final settings = SettingsService();
+      final audioLang = await settings.getPreferredAudioLanguage();
+      final avoidUnsupported = await settings.getAvoidUnsupportedAudio();
+      if (audioLang == 'None' && !avoidUnsupported) return;
+
+      final result = computeAutoSelect(
+        audioTracks: _player.state.tracks.audio,
+        subtitleTracks: _player.state.tracks.subtitle,
+        currentAudio: _player.state.track.audio,
+        currentSubtitle: _player.state.track.subtitle,
+        preferredAudioLang: audioLang,
+        preferredSubtitleLang: 'None',
+        avoidUnsupportedAudio: avoidUnsupported,
+      );
+      if (!result.hasAny) return;
+      if (result.audio != null) {
+        await _player.setAudioTrack(result.audio!);
+      }
+    } catch (e) {
+      debugPrint('[Player] track auto-select failed: $e');
+    }
   }
 
   Future<void> _configureMpvProperties() async {
@@ -1639,10 +1706,23 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
     );
 
     stream.listen(
-      (subs) { if (mounted) setState(() => _externalSubtitles = [...jellyfinSubs, ...subs]); },
-      onDone: () { if (mounted) setState(() => _isFetchingSubs = false); },
+      (subs) {
+        if (mounted) {
+          setState(() => _externalSubtitles = [...jellyfinSubs, ...subs]);
+          _maybeAutoPickExternalSubtitle();
+        }
+      },
+      onDone: () {
+        if (mounted) setState(() => _isFetchingSubs = false);
+        _maybeAutoPickExternalSubtitle();
+      },
     );
   }
+
+  /// Subtitle auto-pick was removed (the user explicitly disabled the
+  /// preferred-subtitle setting). Kept as a no-op so existing call sites
+  /// don't have to be re-plumbed.
+  Future<void> _maybeAutoPickExternalSubtitle() async {}
 
   void _showSubtitlesMenu() {
     String searchQuery = '';
@@ -2724,6 +2804,30 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
           headers = result.headers;
           sources = result.sources;
         }
+      } else if (newProvider.startsWith('nuvio:') && widget.movie != null) {
+        final scraperId = newProvider.substring(6);
+        final results = await NuvioService.instance.runOneScraper(
+          scraperId: scraperId,
+          tmdbId: widget.movie!.id.toString(),
+          type: widget.movie!.mediaType == 'tv' ? 'tv' : 'movie',
+          season: widget.selectedSeason,
+          episode: widget.selectedEpisode,
+        );
+        if (results.isNotEmpty) {
+          final first = results.first;
+          streamUrl = first.url;
+          headers = first.headers.isEmpty ? null : first.headers;
+          sources = results.map((r) => StreamSource(
+                url: r.url,
+                title: r.title.isNotEmpty ? r.title : r.name,
+                type: r.url.toLowerCase().contains('.m3u8')
+                    ? 'hls'
+                    : r.url.toLowerCase().contains('.mpd')
+                        ? 'dash'
+                        : 'mp4',
+                headers: r.headers.isEmpty ? null : r.headers,
+              )).toList();
+        }
       } else if (provider['movie'] != null && provider['tv'] != null) {
         final String providerUrl;
         if (widget.movie!.mediaType == 'tv') {
@@ -3134,6 +3238,35 @@ class _MobilePlayerScreenState extends State<MobilePlayerScreen>
         if (result == null) throw Exception('AMRI extraction failed for S${nextSeason}E$nextEpisode');
         streamUrl = result.url;
         headers = result.headers.isNotEmpty ? result.headers : null;
+      } else if (widget.activeProvider != null &&
+          widget.activeProvider!.startsWith('nuvio:')) {
+        // ── Nuvio scraper: re-run for next episode ────────────────────
+        final scraperId = widget.activeProvider!.substring(6);
+        final results = await NuvioService.instance.runOneScraper(
+          scraperId: scraperId,
+          tmdbId: widget.movie!.id.toString(),
+          type: 'tv',
+          season: nextSeason,
+          episode: nextEpisode,
+        );
+        if (results.isEmpty) {
+          throw Exception('Nuvio: no streams for S${nextSeason}E$nextEpisode');
+        }
+        final first = results.first;
+        streamUrl = first.url;
+        headers = first.headers.isNotEmpty ? first.headers : null;
+        nextSources = results
+            .map((r) => StreamSource(
+                  url: r.url,
+                  title: r.title.isNotEmpty ? r.title : r.name,
+                  type: r.url.toLowerCase().contains('.m3u8')
+                      ? 'hls'
+                      : r.url.toLowerCase().contains('.mpd')
+                          ? 'dash'
+                          : 'mp4',
+                  headers: r.headers.isEmpty ? null : r.headers,
+                ))
+            .toList();
       } else if (widget.activeProvider != null) {
         // ── Stream provider (vidlink, vixsrc, etc.) ───────────────────
         final provider = StreamProviders.providers[widget.activeProvider];

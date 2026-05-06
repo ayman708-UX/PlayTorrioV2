@@ -17,6 +17,7 @@ import 'api/tmdb_api.dart';
 import 'api/local_server_service.dart';
 import 'api/music_player_service.dart';
 import 'api/webstreamr_service.dart';
+import 'api/nuvio_service.dart';
 import 'api/site111477_proxy.dart' as site111477_proxy;
 import 'models/movie.dart';
 import 'services/player_pool_service.dart';
@@ -125,6 +126,12 @@ void main() async {
   // Errors here are non-fatal — the service init() is also called lazily.
   unawaited(WebStreamrService.init().catchError((e) {
     debugPrint('[Boot] WebStreamrService.init failed (non-fatal): $e');
+  }));
+  // Refresh every installed Nuvio addon's manifest in the background so new
+  // upstream providers / fixes flow in without the user reinstalling.
+  // Non-fatal — offline launches just keep the previously cached manifests.
+  unawaited(NuvioService.instance.refreshAllInstalled().catchError((e) {
+    debugPrint('[Boot] Nuvio refresh failed (non-fatal): $e');
   }));
   debugPrint('[Boot] All init complete — launching app');
 

@@ -9,7 +9,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../api/settings_service.dart';
 import '../api/stream_providers.dart';
 import '../api/stremio_service.dart';
+import '../api/nuvio_service.dart';
 import '../api/torrent_stream_service.dart';
+import '../api/track_auto_select.dart';
 import '../services/external_player_service.dart';
 import '../api/debrid_api.dart';
 import '../api/trakt_service.dart';
@@ -40,12 +42,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _isStreamingMode = false;
   String _externalPlayer = 'Built-in Player';
   String _sortPreference = 'Seeders (High to Low)';
+  // Track auto-select
+  String _preferredAudioLang = 'None';
+  bool _avoidUnsupportedAudio = true;
   List<Map<String, dynamic>> _installedAddons = [];
   bool _isInstalling = false;
   
   bool _useDebrid = false;
   String _debridService = 'None';
   final TextEditingController _addonController = TextEditingController();
+  final TextEditingController _nuvioController = TextEditingController();
+  bool _nuvioInstalling = false;
+  List<NuvioAddon> _nuvioAddons = [];
   final TextEditingController _torboxController = TextEditingController();
   final TextEditingController _alldebridController = TextEditingController();
   final TextEditingController _premiumizeController = TextEditingController();
@@ -115,11 +123,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // Stream provider order (Direct Streaming Mode)
   List<String> _streamProviderOrder = [];
+  Map<String, Map<String, dynamic>> _nuvioProviderEntries = {};
 
   @override
   void initState() {
     super.initState();
     _loadSettings();
+    _loadNuvioAddons();
+    NuvioService.changeNotifier.addListener(_loadNuvioAddons);
+  }
+
+  Future<void> _loadNuvioAddons() async {
+    final list = await NuvioService.instance.listUserAddons();
+    if (!mounted) return;
+    setState(() => _nuvioAddons = list);
   }
 
   Future<void> _loadSettings() async {
@@ -192,6 +209,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Load stream provider order
     final streamOrder = await _settings.getStreamProviderOrder();
 
+    // Load track auto-select preferences
+    final preferredAudio = await _settings.getPreferredAudioLanguage();
+    final avoidUnsupported = await _settings.getAvoidUnsupportedAudio();
+
     if (mounted) {
       setState(() {
         _isStreamingMode = streaming;
@@ -232,8 +253,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _navbarVisible = navVisible;
         _navbarOrder = navOrder;
         _streamProviderOrder = streamOrder;
+        _preferredAudioLang = kTrackLanguageDisplayNames.contains(preferredAudio)
+            ? preferredAudio
+            : 'None';
+        _avoidUnsupportedAudio = avoidUnsupported;
       });
     }
+    // Pull dynamic Nuvio scrapers (one entry per enabled scraper) so they
+    // show up alongside the built-in providers in the priority list.
+    try {
+      final entries = await NuvioService.instance.getProviderEntries();
+      if (mounted) setState(() => _nuvioProviderEntries = entries);
+    } catch (_) {}
     if ((prowlarrUrl?.isNotEmpty ?? false) && (prowlarrKey?.isNotEmpty ?? false)) {
       _tryLoadProwlarrTags();
     }
@@ -270,7 +301,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    NuvioService.changeNotifier.removeListener(_loadNuvioAddons);
     _addonController.dispose();
+    _nuvioController.dispose();
     _torboxController.dispose();
     _alldebridController.dispose();
     _premiumizeController.dispose();
@@ -285,6 +318,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _simklPollTimer?.cancel();
     _jackett.dispose();
     _prowlarr.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -328,25 +362,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Track which sections are expanded
   final Set<String> _expandedSections = {'backup'};
 
+  // Owned scroll controller for the settings list. Without this the
+  // Scrollbar attaches to the PrimaryScrollController, which on desktop
+  // makes thumb-drag distance jump every time a section expands and the
+  // scroll extent grows under your cursor.
+  final ScrollController _scrollController = ScrollController();
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Container(
         decoration: AppTheme.backgroundDecoration,
         child: SafeArea(
-          child: CustomScrollView(
-            slivers: [
-              const SliverAppBar(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                floating: true,
-                title: Text('Settings', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 32, fontFamily: 'Poppins')),
-                centerTitle: false,
-              ),
-              SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                sliver: SliverList(
-                  delegate: SliverChildListDelegate([
+          child: Scrollbar(
+            controller: _scrollController,
+            thumbVisibility: true,
+            interactive: true,
+            // Plain SingleChildScrollView + Column instead of CustomScrollView
+            // / SliverList: every child's height is laid out up-front so the
+            // total scroll extent (and therefore the scrollbar thumb size)
+            // stays stable instead of jumping when heavy items like the
+            // ReorderableListView-based provider order get measured lazily.
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 16, bottom: 12),
+                    child: Text('Settings', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 32, fontFamily: 'Poppins')),
+                  ),
 
                     // ── Backup & Restore ──
                     _buildExpandableSection(
@@ -407,6 +453,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               await _settings.setExternalPlayer(val);
                               setState(() => _externalPlayer = val);
                             }
+                          },
+                        ),
+                        _buildFocusableDropdown(
+                          'Preferred Audio Language',
+                          'When a video starts, automatically switch to a matching audio track. Pick "None" to leave the default.',
+                          _preferredAudioLang,
+                          kTrackLanguageDisplayNames,
+                          (val) async {
+                            if (val != null) {
+                              await _settings.setPreferredAudioLanguage(val);
+                              setState(() => _preferredAudioLang = val);
+                            }
+                          },
+                        ),
+                        _buildFocusableToggle(
+                          'Avoid unsupported audio (Atmos / TrueHD / 7.1)',
+                          'Switch to AC-3 / E-AC-3 / AAC when the original track\'s codec or channel layout isn\'t supported.',
+                          _avoidUnsupportedAudio,
+                          (val) async {
+                            await _settings.setAvoidUnsupportedAudio(val);
+                            setState(() => _avoidUnsupportedAudio = val);
                           },
                         ),
                       ],
@@ -519,6 +586,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                         const SizedBox(height: 8),
                         _buildAddonInput(),
+                        const SizedBox(height: 20),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: Text('NUVIO ADDONS', style: TextStyle(color: AppTheme.current.primaryColor, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.5)),
+                        ),
+                        const SizedBox(height: 8),
+                        _buildNuvioAddonSection(),
                         const SizedBox(height: 20),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -644,15 +718,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 40),
                     const Center(
                       child: Text(
-                        'PlayTorrio Native v1.2.9',
+                        'PlayTorrio Native v1.3.1',
                         style: TextStyle(color: Colors.white24, fontSize: 12, letterSpacing: 2, fontWeight: FontWeight.bold),
                       ),
                     ),
                     const SizedBox(height: 100),
-                  ]),
-                ),
+                  ],
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -935,6 +1008,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'home':         {'icon': Icons.home,                       'label': 'Home'},
     'discover':     {'icon': Icons.explore,                    'label': 'Discover'},
     'similar':      {'icon': Icons.auto_awesome,               'label': 'Similar'},
+    'downloader':   {'icon': Icons.cloud_download,             'label': 'Media Downloader'},
     'search':       {'icon': Icons.search,                     'label': 'Search'},
     'mylist':       {'icon': Icons.bookmark,                   'label': 'My List'},
     'magnet':       {'icon': Icons.link_rounded,               'label': 'Magnet'},
@@ -1139,6 +1213,147 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ],
         ],
       ),
+    );
+  }
+
+  Widget _buildNuvioAddonSection() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Install Nuvio Addon',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'Paste a Nuvio manifest URL (raw .../manifest.json)',
+            style: TextStyle(fontSize: 12, color: Colors.white54),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _nuvioController,
+                  decoration: InputDecoration(
+                    hintText: 'https://.../manifest.json',
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: 0.05),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              ElevatedButton(
+                onPressed: _nuvioInstalling ? null : _installNuvioAddon,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primaryColor,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: _nuvioInstalling
+                    ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Text('Install', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+          if (_nuvioAddons.isNotEmpty) ...[
+            const SizedBox(height: 24),
+            const Text(
+              'INSTALLED NUVIO ADDONS',
+              style: TextStyle(color: Colors.white38, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.5),
+            ),
+            const SizedBox(height: 12),
+            ..._nuvioAddons.map((addon) => Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.03),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Theme(
+                    data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                    child: ExpansionTile(
+                      tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                      leading: const Icon(Icons.code_rounded, color: AppTheme.primaryColor),
+                      title: Text(addon.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      subtitle: Text(
+                        '${addon.scrapers.length} scraper${addon.scrapers.length == 1 ? '' : 's'} \u00b7 v${addon.version}',
+                        style: const TextStyle(fontSize: 11, color: Colors.white38),
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 20),
+                        onPressed: () => _removeNuvioAddon(addon.manifestUrl),
+                        tooltip: 'Remove addon',
+                      ),
+                      children: addon.scrapers.map((s) {
+                        return SwitchListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                          dense: true,
+                          activeThumbColor: AppTheme.primaryColor,
+                          value: s.enabled,
+                          onChanged: (val) async {
+                            await NuvioService.instance.setScraperEnabled(
+                              manifestUrl: addon.manifestUrl,
+                              scraperId: s.id,
+                              enabled: val,
+                            );
+                          },
+                          title: Text(s.name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          subtitle: Text(
+                            [
+                              if (s.description != null && s.description!.isNotEmpty) s.description!,
+                              if (s.supportedTypes.isNotEmpty) s.supportedTypes.join(', '),
+                            ].join(' \u00b7 '),
+                            style: const TextStyle(fontSize: 11, color: Colors.white54),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                )),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _installNuvioAddon() async {
+    final url = _nuvioController.text.trim();
+    if (url.isEmpty) return;
+    setState(() => _nuvioInstalling = true);
+    try {
+      final addon = await NuvioService.instance.install(url);
+      if (!mounted) return;
+      _nuvioController.clear();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Installed ${addon.name} (${addon.scrapers.length} scrapers)')),
+      );
+      await _loadNuvioAddons();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Install failed: $e'), backgroundColor: Colors.redAccent),
+      );
+    } finally {
+      if (mounted) setState(() => _nuvioInstalling = false);
+    }
+  }
+
+  Future<void> _removeNuvioAddon(String manifestUrl) async {
+    await NuvioService.instance.remove(manifestUrl);
+    await _loadNuvioAddons();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Nuvio addon removed')),
     );
   }
 
@@ -2736,7 +2951,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Widget _buildStreamProviderOrder() {
-    final providers = StreamProviders.providers;
+    final providers = <String, dynamic>{
+      ...StreamProviders.providers,
+      ..._nuvioProviderEntries,
+    };
     final order = <String>[
       ..._streamProviderOrder.where(providers.containsKey),
     ];

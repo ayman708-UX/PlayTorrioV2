@@ -7,6 +7,7 @@ import '../api/music_player_service.dart';
 import '../utils/app_theme.dart';
 import 'audiobook_player_screen.dart';
 import 'audiobook_downloads_screen.dart';
+import 'generate_audiobook_screen.dart';
 
 class AudiobookScreen extends StatefulWidget {
   const AudiobookScreen({super.key});
@@ -249,6 +250,16 @@ class _AudiobookScreenState extends State<AudiobookScreen> with WidgetsBindingOb
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
+                icon: const Icon(Icons.auto_awesome, color: Colors.white, size: 24),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => const GenerateAudiobookScreen()),
+                  ).then((_) => _loadHistory());
+                },
+                tooltip: 'Generate your own audiobook',
+              ),
+              IconButton(
                 icon: const Icon(Icons.download_rounded, color: Colors.white, size: 26),
                 onPressed: () {
                   Navigator.push(
@@ -288,6 +299,25 @@ class _AudiobookScreenState extends State<AudiobookScreen> with WidgetsBindingOb
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
           contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         ),
+      ),
+    );
+  }
+
+  Widget _buildHistoryThumb(Audiobook book) {
+    final url = book.thumbUrl;
+    final isLocal = url.isNotEmpty && !url.startsWith('http://') && !url.startsWith('https://');
+    if (isLocal) {
+      final f = File(url);
+      if (f.existsSync()) {
+        return Image.file(f, width: 60, height: 60, fit: BoxFit.cover);
+      }
+    }
+    return CachedNetworkImage(
+      imageUrl: url,
+      width: 60, height: 60, fit: BoxFit.cover,
+      errorWidget: (c, u, e) => Container(
+        width: 60, height: 60, color: Colors.white12,
+        child: const Icon(Icons.menu_book_rounded, color: Colors.white54),
       ),
     );
   }
@@ -362,11 +392,7 @@ class _AudiobookScreenState extends State<AudiobookScreen> with WidgetsBindingOb
                           children: [
                             ClipRRect(
                               borderRadius: BorderRadius.circular(8),
-                              child: CachedNetworkImage(
-                                imageUrl: book.thumbUrl,
-                                width: 60, height: 60, fit: BoxFit.cover,
-                                errorWidget: (c, u, e) => const Icon(Icons.book),
-                              ),
+                              child: _buildHistoryThumb(book),
                             ),
                             const SizedBox(width: 16),
                             Expanded(

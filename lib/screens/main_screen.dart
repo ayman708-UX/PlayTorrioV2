@@ -18,6 +18,7 @@ import 'anime_screen.dart';
 import 'anime_arabic_screen.dart';
 import 'asian_drama_screen.dart';
 import 'similar/similar_hub_screen.dart';
+import 'media_downloader_screen.dart';
 import 'arabic_screen.dart';
 import 'live_matches_screen.dart';
 import 'magnet_player_screen.dart';
@@ -33,6 +34,9 @@ class MainScreen extends StatefulWidget {
   /// Notifier that SearchScreen listens to for incoming Stremio search requests.
   /// Value is {'query': '...', 'addonBaseUrl': '...'} or null.
   static final ValueNotifier<Map<String, String>?> stremioSearchNotifier = ValueNotifier<Map<String, String>?>(null);
+
+  /// Anywhere in the app: `MainScreen.requestTab.value = 'home';` to switch tab.
+  static final ValueNotifier<String?> requestTab = ValueNotifier<String?>(null);
 
   static State<MainScreen>? of(BuildContext context) {
     return context.findAncestorStateOfType<_MainScreenState>();
@@ -54,7 +58,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   static const Map<String, Map<String, dynamic>> _navMeta = {
     'home':         {'icon': Icons.home_outlined,              'active': Icons.home,                    'label': 'Home'},
     'discover':     {'icon': Icons.explore_outlined,            'active': Icons.explore,                 'label': 'Discover'},
-    'similar':      {'icon': Icons.auto_awesome_outlined,       'active': Icons.auto_awesome,            'label': 'Similar'},
+    'similar':      {'icon': Icons.auto_awesome_outlined, 'active': Icons.auto_awesome, 'label': 'Similar'},
+    'downloader':   {'icon': Icons.cloud_download_outlined, 'active': Icons.cloud_download, 'label': 'Media Downloader'},
     'search':       {'icon': Icons.search,                      'active': Icons.search,                  'label': 'Search'},
     'mylist':       {'icon': Icons.bookmark_outline,            'active': Icons.bookmark,                'label': 'My List'},
     'magnet':       {'icon': Icons.link_rounded,                'active': Icons.link_rounded,            'label': 'Magnet'},
@@ -81,12 +86,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     MainScreen.stremioSearchNotifier.addListener(_onStremioSearch);
+    MainScreen.requestTab.addListener(_onRequestTab);
     SettingsService.navbarChangeNotifier.addListener(_onNavbarConfigChanged);
 
     _allScreens = {
       'home':         const HomeScreen(),
       'discover':     const DiscoverScreen(),
       'similar':      const SimilarHubScreen(),
+      'downloader':   const MediaDownloaderScreen(),
       'search':       const SearchScreen(),
       'mylist':       const MyListScreen(),
       'magnet':       const MagnetPlayerScreen(),
@@ -192,6 +199,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     if (idx != -1) setState(() => _selectedIndex = idx);
   }
 
+  void _onRequestTab() {
+    final id = MainScreen.requestTab.value;
+    if (id == null) return;
+    final idx = _visibleIds.indexOf(id);
+    if (idx != -1 && mounted) setState(() => _selectedIndex = idx);
+    MainScreen.requestTab.value = null;
+  }
+
   void _onItemTapped(int index) {
     setState(() => _selectedIndex = index);
   }
@@ -212,6 +227,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     _metricsSafety?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     MainScreen.stremioSearchNotifier.removeListener(_onStremioSearch);
+    MainScreen.requestTab.removeListener(_onRequestTab);
     SettingsService.navbarChangeNotifier.removeListener(_onNavbarConfigChanged);
     super.dispose();
   }

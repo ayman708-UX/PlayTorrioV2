@@ -6,6 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:palette_generator/palette_generator.dart';
 import 'package:shimmer/shimmer.dart';
 import '../api/tmdb_api.dart';
+import '../api/bestsimilar_scraper.dart';
 import '../api/settings_service.dart';
 import '../api/stremio_service.dart';
 import '../api/stream_extractor.dart';
@@ -67,7 +68,7 @@ class _HomeScreenState extends State<HomeScreen> with AutomaticKeepAliveClientMi
   Movie? _tonightsPick;
 
   // "Because you watched ___" — randomized seed pulled from continue-watching
-  // once per session, then TMDB recommendations (curated, not /similar trash).
+  // once per session, then BestSimilar.com recommendations (mapped to TMDB).
   Map<String, dynamic>? _becauseSeed; // raw history item
   Future<List<Movie>>? _becauseFuture;
   int _becausePoolSize = 0; // unique in-progress shows; controls shuffle button
@@ -175,17 +176,100 @@ class _HomeScreenState extends State<HomeScreen> with AutomaticKeepAliveClientMi
   }
 
   Future<List<Movie>> _loadBecauseRecs(Map<String, dynamic> seed) async {
-    final tmdbId = seed['tmdbId'] as int?;
-    if (tmdbId == null) return const [];
+    final title = (seed['title'] as String?)?.trim();
+    if (title == null || title.isEmpty) {
+      debugPrint('[BecauseYouWatched] no title in seed');
+      return const [];
+    }
     final mediaType = (seed['mediaType'] as String?) ??
         (seed['season'] != null ? 'tv' : 'movie');
+    final isTv = mediaType == 'tv';
+    debugPrint('[BecauseYouWatched] seed="$title" isTv=$isTv');
+
     try {
-      final results = mediaType == 'tv'
-          ? await _api.getTvRecommendations(tmdbId)
-          : await _api.getMovieRecommendations(tmdbId);
-      // Filter out poster-less stubs so the row never shows blank cards.
-      return results.where((m) => m.posterPath.isNotEmpty).toList();
-    } catch (_) {
+      // 1) Autocomplete on bestsimilar; pick the closest hit (forgiving).
+      final hits = await BestSimilarScraper.autocomplete(title);
+      debugPrint('[BecauseYouWatched] autocomplete hits=${hits.length}');
+      if (hits.isEmpty) return const [];
+
+      final lowerTitle = title.toLowerCase();
+      BSAutocompleteHit? hit;
+      // Prefer same-type exact title match.
+      for (final h in hits) {
+        if (h.isTv == isTv && h.title.toLowerCase() == lowerTitle) {
+          hit = h; break;
+        }
+      }
+      // Then any exact title match.
+      hit ??= hits.firstWhere(
+        (h) => h.title.toLowerCase() == lowerTitle,
+        orElse: () => hits.first,
+      );
+      debugPrint('[BecauseYouWatched] picked hit id=${hit.id} title="${hit.title}"');
+
+      // 2) Detail page → similar items.
+      final details =
+          await BestSimilarScraper.fetchDetails(id: hit.id, slug: hit.slug);
+      if (details == null || details.similar.isEmpty) {
+        debugPrint('[BecauseYouWatched] no similar items returned');
+        return const [];
+      }
+      debugPrint('[BecauseYouWatched] bestsimilar similar=${details.similar.length}');
+
+      // 3) Resolve each BS item to a TMDB Movie (parallel) — relaxed threshold
+      //    so we don't drop everything when the year is unknown.
+      final lookups = details.similar.map((it) async {
+        try {
+          final hits = await _api.searchMulti(it.title);
+          if (hits.isEmpty) return null;
+          Movie? best;
+          var bestScore = -1;
+          for (final h in hits) {
+            var s = 0;
+            final ht = h.title.toLowerCase();
+            final it2 = it.title.toLowerCase();
+            if (ht == it2) {
+              s += 5;
+            } else if (ht.startsWith(it2) || it2.startsWith(ht)) {
+              s += 2;
+            }
+            if (it.year != null && h.releaseDate.length >= 4) {
+              final hy = int.tryParse(h.releaseDate.substring(0, 4));
+              if (hy == it.year) {
+                s += 4;
+              } else if (hy != null && (hy - it.year!).abs() <= 1) {
+                s += 1;
+              }
+            }
+            if (h.posterPath.isNotEmpty) s += 1;
+            if (s > bestScore) {
+              bestScore = s;
+              best = h;
+            }
+          }
+          if (best == null || bestScore < 2) return null;
+          if (best.posterPath.isEmpty) return null;
+          return MapEntry(it.similarityPercent ?? -1, best);
+        } catch (_) {
+          return null;
+        }
+      });
+      final resolved = await Future.wait(lookups);
+
+      // 4) Sort by bestsimilar similarity % (desc), drop dupes & nulls.
+      //    Items without a percentage fall to the bottom.
+      final ranked = resolved.whereType<MapEntry<int, Movie>>().toList()
+        ..sort((a, b) => b.key.compareTo(a.key));
+      final out = <Movie>[];
+      final seen = <int>{};
+      for (final e in ranked) {
+        if (!seen.add(e.value.id)) continue;
+        out.add(e.value);
+      }
+      debugPrint('[BecauseYouWatched] tmdb-resolved=${out.length} (sorted by %)');
+      return out;
+    } catch (e) {
+      debugPrint('[BecauseYouWatched] failed: $e');
       return const [];
     }
   }
@@ -858,7 +942,7 @@ class _HomeScreenState extends State<HomeScreen> with AutomaticKeepAliveClientMi
                 ),
               ),
 
-              // "Because you watched ___" — TMDB curated recommendations
+              // "Because you watched ___" — BestSimilar.com recommendations
               // (the /recommendations endpoint, not the trash /similar one)
               if (_becauseSeed != null && _becauseFuture != null)
                 SliverToBoxAdapter(
@@ -4579,7 +4663,7 @@ class _MoodSectionState extends State<_MoodSection> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  BECAUSE YOU WATCHED — TMDB curated recommendations seeded from CW history
+//  BECAUSE YOU WATCHED — BestSimilar.com recommendations seeded from CW history
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _BecauseYouWatchedSection extends StatefulWidget {

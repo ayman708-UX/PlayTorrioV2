@@ -52,6 +52,33 @@ class SettingsService {
   static const String _subBottomPaddingKey = 'sub_bottom_padding';
   static const String _subFontKey = 'sub_font';
 
+  // Track auto-select preferences
+  static const String _preferredAudioLangKey = 'preferred_audio_lang';
+  static const String _avoidUnsupportedAudioKey = 'avoid_unsupported_audio';
+
+  // ── Track auto-select getters/setters ─────────────────────────────────────
+
+  /// Display name (e.g. "English") of the audio language to auto-switch to
+  /// once a video's audio tracks are known. Returns 'None' to mean
+  /// "don't touch the default audio track".
+  Future<String> getPreferredAudioLanguage() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_preferredAudioLangKey) ?? 'None';
+  }
+  Future<void> setPreferredAudioLanguage(String v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_preferredAudioLangKey, v);
+  }
+
+  Future<bool> getAvoidUnsupportedAudio() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_avoidUnsupportedAudioKey) ?? true;
+  }
+  Future<void> setAvoidUnsupportedAudio(bool v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_avoidUnsupportedAudioKey, v);
+  }
+
   // ── Subtitle getters/setters ──────────────────────────────────────────────
 
   Future<double> getSubSize({bool isDesktop = false}) async {
@@ -163,12 +190,28 @@ class SettingsService {
     if (saved == null || saved.isEmpty) {
       return List<String>.from(defaultStreamProviderOrder);
     }
-    // Preserve user order, then append any newly-added providers we didn't
-    // know about when the order was first saved.
-    final out = <String>[
-      ...saved.where((k) => defaultStreamProviderOrder.contains(k)),
-    ];
+    // Preserve every saved key (including Nuvio scrapers like
+    // `nuvio:moviesmod` that aren't in the built-in default list), then
+    // append any newly-shipped built-in providers we didn't know about
+    // when the order was first saved.
+    final out = <String>[...saved];
     for (final k in defaultStreamProviderOrder) {
+      if (!out.contains(k)) out.add(k);
+    }
+    return out;
+  }
+
+  /// Merges a saved provider order with the currently-available provider
+  /// keys: keeps user ordering for keys that still exist, then appends any
+  /// new keys at the end. Drops keys whose provider has gone away.
+  static List<String> mergeProviderOrder(
+      List<String> saved, Iterable<String> available) {
+    final availSet = available.toSet();
+    final out = <String>[];
+    for (final k in saved) {
+      if (availSet.contains(k) && !out.contains(k)) out.add(k);
+    }
+    for (final k in available) {
       if (!out.contains(k)) out.add(k);
     }
     return out;
@@ -391,7 +434,7 @@ class SettingsService {
 
   /// All available nav items in default order. 'settings' is always last and locked.
   static const List<String> allNavIds = [
-    'home', 'discover', 'similar', 'search', 'mylist', 'magnet', 'live_matches',
+    'home', 'discover', 'similar', 'search', 'mylist', 'downloader', 'magnet', 'live_matches',
     'iptv', 'audiobooks', 'books', 'music', 'comics', 'manga',
     'jellyfin', 'anime', 'anime_arabic', 'asian_drama', 'arabic',
   ];

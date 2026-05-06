@@ -161,15 +161,15 @@ class Site111477Service {
   }
 
   static String _describeMatch(Site111477Match m) {
-    final q = _qualityTag(m.fileName);
-    final s = m.sizeBytes > 0 ? _humanSize(m.sizeBytes) : '';
+    final q = qualityTagFor(m.fileName);
+    final s = m.sizeBytes > 0 ? humanSize(m.sizeBytes) : '';
     if (q.isEmpty && s.isEmpty) return '111477';
     if (q.isEmpty) return '111477 • $s';
     if (s.isEmpty) return '$q • 111477';
     return '$q • $s';
   }
 
-  static String _qualityTag(String name) {
+  static String qualityTagFor(String name) {
     final n = name.toLowerCase();
     if (n.contains('2160p') || n.contains('4k')) return '2160P';
     if (n.contains('1080p')) return '1080P';
@@ -179,7 +179,7 @@ class Site111477Service {
     return '';
   }
 
-  static String _humanSize(int bytes) {
+  static String humanSize(int bytes) {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     var v = bytes.toDouble();
     var i = 0;

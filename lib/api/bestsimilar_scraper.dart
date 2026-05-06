@@ -405,6 +405,13 @@ BSDetails? _parseDetailsHtml(_ParseInput input) {
       }
     }
 
+    // Sort by similarity % descending; items without a percent go last.
+    items.sort((a, b) {
+      final av = a.similarityPercent ?? -1;
+      final bv = b.similarityPercent ?? -1;
+      return bv.compareTo(av);
+    });
+
     return BSDetails(
       id: input.id,
       slug: input.slug,

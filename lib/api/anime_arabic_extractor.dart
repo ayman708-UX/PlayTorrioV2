@@ -30,6 +30,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../models/stream_source.dart';
+import '../services/mega_proxy.dart';
 import 'anime_arabic_service.dart';
 
 /// One server slug + the iframe URL the page would have embedded.
@@ -392,6 +393,36 @@ class AnimeArabicExtractor {
     ArabicResolvedServer server, {
     required Duration timeout,
   }) async {
+    // Mega.nz embeds (animeify) are AES-CTR encrypted; decrypt-on-the-fly
+    // through a local loopback proxy so media_kit can consume plain MP4.
+    final iframeHost =
+        Uri.tryParse(server.iframeUrl)?.host.toLowerCase() ?? '';
+    if (iframeHost.contains('mega.nz') || iframeHost.contains('mega.co.nz')) {
+      try {
+        final mega = await MegaProxy.instance
+            .resolve(server.iframeUrl)
+            .timeout(timeout);
+        if (mega == null) {
+          debugPrint('[ArabicExtractor] mega proxy returned null for '
+              '${server.name}');
+          return const [];
+        }
+        return [
+          ArabicResolvedStream(
+            server: server,
+            url: mega.url,
+            quality: '',
+            type: 'video',
+            // Loopback proxy serves raw bytes; no upstream headers needed.
+            headers: const {},
+          ),
+        ];
+      } catch (e) {
+        debugPrint('[ArabicExtractor] mega proxy failed ${server.name}: $e');
+        return const [];
+      }
+    }
+
     final client = HttpClient()
       ..userAgent = _userAgent
       ..connectionTimeout = const Duration(seconds: 12);

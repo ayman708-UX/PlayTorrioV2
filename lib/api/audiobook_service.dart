@@ -24,7 +24,7 @@ class Audiobook {
   });
 
   String get thumbUrl {
-    if (source == 'audiozaic' || source == 'goldenaudiobook' || source == 'appaudiobooks' || source == 'audionest') return coverImage;
+    if (source == 'audiozaic' || source == 'goldenaudiobook' || source == 'appaudiobooks' || source == 'audionest' || source == 'paper2audio') return coverImage;
     return 'https://tokybook.com/images/$audioBookId';
   }
 
@@ -333,6 +333,11 @@ class AudiobookService {
   }
 
   Future<List<AudiobookChapter>> getChapters(Audiobook book) async {
+    if (book.source == 'paper2audio') {
+      final url = book.pageUrl;
+      if (url == null || url.isEmpty) return [];
+      return [AudiobookChapter(title: book.title, url: url)];
+    }
     if (book.source == 'goldenaudiobook') {
       return _getGoldenChapters(book);
     }

@@ -170,9 +170,9 @@ class VidsrcExtractor {
   /// and substitute `{vN}` placeholders with the default cloudnestra host.
   ///
   /// The `file:` value looks like:
-  ///   "https://tmstr4.{v1}/pl/<b64>/master.m3u8 or
-  ///    https://tmstr4.{v2}/pl/<b64>/master.m3u8 or
-  ///    https://app2.{v5}/cdnstr/<b64>/list.m3u8"
+  ///   "https://tmstr4.`{v1}`/pl/`<b64>`/master.m3u8 or
+  ///    https://tmstr4.`{v2}`/pl/`<b64>`/master.m3u8 or
+  ///    https://app2.`{v5}`/cdnstr/`<b64>`/list.m3u8"
   static String? _findM3u8(String html) {
     final fileMatch =
         RegExp(r'''file\s*:\s*"([^"]+\.m3u8[^"]*)"''').firstMatch(html);

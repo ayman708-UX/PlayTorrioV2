@@ -2,7 +2,7 @@ name: play_torrio_native
 description: "PlayTorrio - Your cinema universe, Stream anything, anywhere."
 publish_to: 'none'
 
-version: 1.3.0+31
+version: 1.3.1+32
 
 environment:
   sdk: ^3.11.0
@@ -53,6 +53,7 @@ dependencies:
   palette_generator: ^0.3.3+4
   pointycastle: ^3.9.1
   crypto: ^3.0.5
+  flutter_js: ^0.8.0
 
 dev_dependencies:
   flutter_test:
@@ -76,3 +77,4 @@ flutter:
   assets:
     - assets/icon/
     - assets/videasy/
+    - assets/nuvio/
