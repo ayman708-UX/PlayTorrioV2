@@ -91,31 +91,22 @@ class TorrentStreamService {
 
     _setState(EngineState.starting);
     try {
-      // Faster poll for snappier UI updates (matches the libtorrent_flutter
-      // example app — 200ms vs the 600ms default).
       await LibtorrentFlutter.init(
         fetchTrackers: true,
         pollInterval: const Duration(milliseconds: 200),
       );
 
-
       try {
         final engine = LibtorrentFlutter.instance;
         final connLimit = await _settings.getTorrentConnectionsLimit();
-        const tunedCacheBytes = 256 * 1024 * 1024; // 256MB session cache
         engine.configureSession(engine.getDefaultConfig().copyWith(
           connectionsLimit: connLimit,
-          cacheSize: tunedCacheBytes,
-          responsiveMode: true,
-          readerReadAhead: 95,
-          preloadCache: 50,
           forceEncrypt: false,
           disableDht: false,
-          disableUpnp: false,
           downloadRateLimit: 0,
           uploadRateLimit: 0,
         ));
-        _log('Session configured: conns=$connLimit, cache=256MB, responsive=true');
+        _log('Session configured: conns=$connLimit');
       } catch (e) {
         _log('configureSession failed (non-fatal): $e');
       }
@@ -134,9 +125,7 @@ class TorrentStreamService {
   }
 
   /// Live-update the per-torrent peer connection limit. Persists the new
-  /// value and reconfigures the running session immediately so the change
-  /// takes effect on the next torrent (and on existing torrents the next
-  /// time libtorrent rebalances peers).
+  /// value and reconfigures the running session immediately.
   Future<void> applyConnectionsLimit(int limit) async {
     final clamped = limit.clamp(5, 200);
     await _settings.setTorrentConnectionsLimit(clamped);
@@ -145,17 +134,12 @@ class TorrentStreamService {
       final engine = LibtorrentFlutter.instance;
       engine.configureSession(engine.getDefaultConfig().copyWith(
         connectionsLimit: clamped,
-        cacheSize: 256 * 1024 * 1024,
-        responsiveMode: true,
-        readerReadAhead: 95,
-        preloadCache: 50,
         forceEncrypt: false,
         disableDht: false,
-        disableUpnp: false,
         downloadRateLimit: 0,
         uploadRateLimit: 0,
       ));
-      _log('Connections limit updated: $clamped (cache=256MB)');
+      _log('Connections limit updated: $clamped');
     } catch (e) {
       _log('applyConnectionsLimit failed: $e');
     }
@@ -229,7 +213,10 @@ class TorrentStreamService {
 
       _log('Selected file index $selectedIndex: ${files.firstWhere((f) => f.index == selectedIndex).name}');
 
-      // Step 5: Start the stream
+      // Step 5: Start the stream.
+      // maxCacheBytes controls the sliding RAM window — pass the user's
+      // configured value when using RAM cache, otherwise let the engine
+      // use its default (0 = engine default ~128MB).
       final maxCacheBytes = saveToRam ? (ramCacheMb * 1024 * 1024) : 0;
       final streamInfo = LibtorrentFlutter.instance.startStream(
         torrentId,
@@ -239,16 +226,6 @@ class TorrentStreamService {
 
       if (hash != null) {
         _activeStreams[hash] = streamInfo.id;
-      }
-
-      // Aggressively prefetch the head of the stream so the player gets
-      // first bytes ASAP — mirrors Stremio's startup behaviour.
-      try {
-        const preloadBytes = 32 * 1024 * 1024; // 32MB head prefetch
-        LibtorrentFlutter.instance.preloadStream(streamInfo.id, preloadBytes: preloadBytes);
-        _log('preloadStream queued: ${preloadBytes ~/ (1024 * 1024)}MB');
-      } catch (e) {
-        _log('preloadStream failed (non-fatal): $e');
       }
 
       _log('Stream started: ${streamInfo.url}');
@@ -326,7 +303,6 @@ class TorrentStreamService {
           .where((f) => TorrentFilter.isFileMatch(f.name, season, episode))
           .toList();
       if (episodeMatches.isNotEmpty) {
-        // Pick largest matching file (most likely the actual episode)
         episodeMatches.sort((a, b) => b.size.compareTo(a.size));
         return episodeMatches.first.index;
       }
@@ -428,13 +404,11 @@ class TorrentStreamService {
   // ─────────────────────────────────────────────────────────────────────────
 
   Future<void> stop() async {
-    // Stop all active streams
     for (final streamId in _activeStreams.values) {
       _safeStopStream(streamId);
     }
     _activeStreams.clear();
 
-    // Dispose all active torrents
     for (final torrentId in _activeTorrents.values) {
       _safeDisposeTorrent(torrentId);
     }
