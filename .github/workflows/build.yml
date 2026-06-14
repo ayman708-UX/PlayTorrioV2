@@ -107,11 +107,29 @@ jobs:
           APP=PlayTorrio.AppDir
           mkdir -p "$APP"
           cp -r build/linux/x64/release/bundle/* "$APP/"
-          # cp assets/icon/icon.png "$APP/PlayTorrio.png"
-          # cp installer/linux/PlayTorrio.desktop "$APP/"
+          
+          # Create a basic desktop file and icon if they are missing
+          if [ -f "assets/icon/icon.png" ]; then
+            cp assets/icon/icon.png "$APP/PlayTorrio.png"
+          else
+            touch "$APP/PlayTorrio.png"
+          fi
+          
+          if [ -f "installer/linux/PlayTorrio.desktop" ]; then
+            cp installer/linux/PlayTorrio.desktop "$APP/"
+          else
+            cat <<EOF > "$APP/PlayTorrio.desktop"
+          [Desktop Entry]
+          Name=PlayTorrio
+          Exec=AppRun
+          Icon=PlayTorrio
+          Type=Application
+          Categories=Utility;
+          EOF
+          fi
 
           # AppRun launcher
-          printf '#!/bin/bash\ncd "$(dirname "$0")"\nexec ./play_torrio_native "$@"\n' \
+          printf '#!/bin/bash\ncd "\$(dirname "\$0")"\nexec ./PlayTorrio "\$@"\n' \
             > "$APP/AppRun"
           chmod +x "$APP/AppRun"
 
