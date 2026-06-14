@@ -53,83 +53,61 @@ jobs:
           path: installer/windows/Output/PlayTorrio-Windows-Setup.exe
 
   # ─── Linux x64 ───────────────────────────────────────────────────────────
-  # Commented out - not currently building Linux
-  # linux-x64:
-  #   name:  Linux x64 (AppImage)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #
-  #     - uses: subosito/flutter-action@v2
-  #       with:
-  #         channel: ${{ env.FLUTTER_CHANNEL }}
-  #
-  #     - name: Install Linux build dependencies
-  #       run: |
-  #         sudo apt-get update -y
-  #         sudo apt-get install -y \
-  #           clang cmake git ninja-build pkg-config \
-  #           libgtk-3-dev liblzma-dev libstdc++-12-dev \
-  #           libmpv-dev libsecret-1-dev libjsoncpp-dev \
-  #           libwebkit2gtk-4.1-dev \
-  #           libfuse2
-  #
-  #     - name: Generate Linux platform files
-  #       run: |
-  #         flutter create --platforms=linux .
-  #
-  #         # Fix binary name & window title
-  #         sed -i 's/set(BINARY_NAME "play_torrio_native")/set(BINARY_NAME "PlayTorrio")/' \
-  #           linux/CMakeLists.txt
-  #         sed -i 's/set(APPLICATION_ID "com.example.play_torrio_native")/set(APPLICATION_ID "com.playtorrio.app")/' \
-  #           linux/CMakeLists.txt
-  #         
-  #         # Fix application name in my_application.cc if it exists
-  #         if [ -f "linux/my_application.cc" ]; then
-  #           sed -i 's/play_torrio_native/PlayTorrio/g' linux/my_application.cc
-  #         fi
-  #
-  #     - name: Download TorrServer
-  #       run: |
-  #         TORR_URL="https://github.com/$TORRSERVER_REPO/releases/latest/download"
-  #         mkdir -p assets/bin/linux
-  #         curl -fSL "$TORR_URL/TorrServer-linux-amd64" -o assets/bin/linux/TorrServer
-  #         chmod +x assets/bin/linux/TorrServer
-  #
-  #     - name: Enable Linux TorrServer asset
-  #       run: |
-  #         sed -i 's|#- assets/bin/linux/TorrServer|- assets/bin/linux/TorrServer|' pubspec.yaml
-  #
-  #     - run: flutter pub get
-  #     - run: flutter build linux --release
-  #
-  #     - name: Package as AppImage
-  #       run: |
-  #         # Download appimagetool
-  #         curl -fSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
-  #           -o appimagetool
-  #         chmod +x appimagetool
-  #
-  #         # Create AppDir from Flutter bundle
-  #         APP=PlayTorrio.AppDir
-  #         mkdir -p "$APP"
-  #         cp -r build/linux/x64/release/bundle/* "$APP/"
-  #         cp assets/icon/icon.png "$APP/PlayTorrio.png"
-  #         cp installer/linux/PlayTorrio.desktop "$APP/"
-  #
-  #         # AppRun launcher
-  #         printf '#!/bin/bash\ncd "$(dirname "$0")"\nexec ./PlayTorrio "$@"\n' \
-  #           > "$APP/AppRun"
-  #         chmod +x "$APP/AppRun"
-  #
-  #         # Build the AppImage
-  #         ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
-  #           "$APP" PlayTorrio-Linux-x86_64.AppImage
-  #
-  #     - uses: actions/upload-artifact@v4
-  #       with:
-  #         name: PlayTorrio-Linux-x64
-  #         path: PlayTorrio-Linux-x86_64.AppImage
+  linux-x64:
+    name:  Linux x64 (AppImage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake git ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libmpv-dev libsecret-1-dev libjsoncpp-dev \
+            libwebkit2gtk-4.1-dev \
+            libfuse2
+
+      - run: flutter pub get
+      - run: >
+          flutter build linux --release
+          --dart-define=TRAKT_CLIENT_ID=${{ secrets.TRAKT_CLIENT_ID }}
+          --dart-define=TRAKT_CLIENT_SECRET=${{ secrets.TRAKT_CLIENT_SECRET }}
+          --dart-define=SIMKL_CLIENT_ID=${{ secrets.SIMKL_CLIENT_ID }}
+          --dart-define=SIMKL_CLIENT_SECRET=${{ secrets.SIMKL_CLIENT_SECRET }}
+
+      - name: Package as AppImage
+        run: |
+          # Download appimagetool
+          curl -fSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -o appimagetool
+          chmod +x appimagetool
+
+          # Create AppDir from Flutter bundle
+          APP=PlayTorrio.AppDir
+          mkdir -p "$APP"
+          cp -r build/linux/x64/release/bundle/* "$APP/"
+          # cp assets/icon/icon.png "$APP/PlayTorrio.png"
+          # cp installer/linux/PlayTorrio.desktop "$APP/"
+
+          # AppRun launcher
+          printf '#!/bin/bash\ncd "$(dirname "$0")"\nexec ./play_torrio_native "$@"\n' \
+            > "$APP/AppRun"
+          chmod +x "$APP/AppRun"
+
+          # Build the AppImage
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run \
+            "$APP" PlayTorrio-Linux-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PlayTorrio-Linux-x64
+          path: PlayTorrio-Linux-x86_64.AppImage
 
   # ─── macOS ARM64 (Apple Silicon) ─────────────────────────────────────────
   macos-arm64:
