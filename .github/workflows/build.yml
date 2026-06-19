@@ -30,6 +30,11 @@ jobs:
         with:
           channel: ${{ env.FLUTTER_CHANNEL }}
 
+      - name: Setup CMake (Downgrade to 3.29.3 to avoid symlink extraction issue)
+        uses: jwlawson/actions-setup-cmake@v2.0
+        with:
+          cmake-version: '3.29.3'
+
       - run: flutter pub get
       - run: >
           flutter build windows --release
