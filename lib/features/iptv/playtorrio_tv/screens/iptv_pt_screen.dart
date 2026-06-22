@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../controller/iptv_controller.dart';
@@ -543,8 +544,7 @@ class _PortalListView extends StatelessWidget {
   Widget _buildSourcePicker() {
     const items = <(CatalogSource, String, String)>[
       (CatalogSource.best, 'Source 1', 'Best'),
-      (CatalogSource.fastest, 'Source 2', 'Fastest'),
-      (CatalogSource.works, 'Source 3', 'Works'),
+      (CatalogSource.works, 'Source 2', 'Works'),
     ];
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -775,7 +775,22 @@ class _PortalCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (!editMode)
+                if (!editMode) ...[
+                  IconButton(
+                    tooltip: 'Copy portal details',
+                    onPressed: () {
+                      final p = v.portal;
+                      final cleanUrl = p.url.replaceFirst('http://', '').replaceFirst('https://', '');
+                      Clipboard.setData(ClipboardData(text: '$cleanUrl:${p.username}:${p.password}'));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Portal details copied to clipboard'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.copy_rounded, color: Colors.white54, size: 20),
+                  ),
                   IconButton(
                     tooltip: isFavorite ? 'Unfavorite' : 'Favorite',
                     onPressed: onToggleFavorite,
@@ -787,6 +802,7 @@ class _PortalCard extends StatelessWidget {
                       size: 22,
                     ),
                   ),
+                ],
               ],
             ),
           ),

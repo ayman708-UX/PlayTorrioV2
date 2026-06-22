@@ -1,8 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' as io;
-import 'dart:math' as math;
-import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'models.dart';
@@ -540,37 +537,29 @@ class IptvAliveChecker {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Which backend the catalog scraper should pull from. The labels are
-/// intentionally opaque (best/fastest/works) so the underlying source
+/// intentionally opaque (best/works) so the underlying source
 /// names aren't surfaced in the UI.
-///   - [best]    → curated pre-validated database (highest hit rate)
-///   - [fastest] → quick plain-text dumps
-///   - [works]   → freshest community catalog (volatile)
-enum CatalogSource { best, fastest, works }
+///   - [best]    → Reddit OAuth2 scraper (unlimited, freshest)
+///   - [works]   → GitHub XML2 dumps (quick plain-text dumps)
+enum CatalogSource { best, works }
 
 class IptvScraper {
-  // Reddit's `.json` endpoint returns an HTML interstitial for browser-like
-  // User-Agents (anti-scraping). We therefore query the old.reddit.com host
-  // with a non-browser UA, and transparently fall back to other hosts.
-  // Reddit now 403s almost every unauthenticated UA. Strategy (in order):
-  //   1. Try hitting reddit hosts directly with a Googlebot UA — many Reddit
-  //      anti-bot rules still whitelist search-engine crawlers.
-  //   2. Fall back to public fetch/CORS proxies that perform the request
-  //      server-side (allorigins, corsproxy.io, r.jina.ai reader).
-  //   3. Last resort: scrape the .rss feed and extract links from <description>
-  //      CDATA sections (HTML, not JSON).
-  static const _catalogSub = 'IPTV_ZONENEW';
-  // One quick direct attempt — Reddit currently 403s almost everything, but
-  // this is cheap so we try once before going through a proxy.
-  static const _catalogDirectHost = 'https://www.reddit.com';
-  static const _catalogDirectUa =
-      'Googlebot/2.1 (+http://www.google.com/bot.html)';
-  // Public fetch proxies ordered by observed reliability (corsproxy.io has
-  // worked in practice; others are fallbacks). `{URL}` = URL-encoded target.
-  static const _fetchProxies = <String>[
-    'https://corsproxy.io/?{URL}',
-    'https://api.codetabs.com/v1/proxy?quest={URL}',
-    'https://api.allorigins.win/raw?url={URL}',
+  // Reddit killed unauthenticated `.json` access in mid-2026 and all CORS
+  // proxies are dead. We now use OAuth2 "installed_client" grants with
+  // open-source Reddit app client IDs for anonymous bearer tokens.
+  // This gives 100 posts/page with full pagination — unlimited scraping.
+  // Falls back to RSS if all OAuth2 attempts fail.
+  static const _catalogSubs = ['IPTV_ZONENEW', 'FreeIPTV', 'iptvguru', 'IPTVfree'];
+  static const _oauthUa = 'PlayTorrio/1.3.6 (by /u/PlayTorrioApp)';
+  // Open-source Reddit client IDs (public, installed-app type).
+  static const _oauthClientIds = [
+    'ohXpoqrZYub1kg',  // Slide for Reddit
+    'NOe2iKrPPzwscA',  // RedReader
+    'JrPdG8Z6dkWNxA',  // Stealth
   ];
+  static String? _oauthToken;
+  static DateTime? _oauthTokenExpiry;
+  static int _oauthClientIdx = 0;
   static const _ua = 'Mozilla/5.0 (Linux; Android 11; PlayTorrio) '
       'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36';
 
@@ -601,146 +590,6 @@ class IptvScraper {
   static const _junkTokens = [
     'type=m3u', 'output=ts', 'password=', 'username=', 'password', 'username',
   ];
-
-  // ── Cloudflare R2: Xtreamity-Plus precompiled portal database. ──────
-  // Source: cracked from Mohcin Bajja's `app.xtream.codegenerator` Android
-  // app. The app downloads ONE gzipped CSV from Cloudflare R2 with ~8 000
-  // pre-validated working portals. We sign the GET with AWS SigV4 (R2 is
-  // S3-compatible) and reuse the result for [_xtreamityTtl].
-  // CSV schema per row:
-  //   url, username, password, "MM/DD/YYYY", " HH:MM", region
-  // (the date contains a comma so it spans 2 cells — we don't need it.)
-  static const _xtreamityHost =
-      '145ef3f7a9832804bef0e31548db8a83.r2.cloudflarestorage.com';
-  static const _xtreamityBucket = 'xtreamity';
-  static const _xtreamityObject = 'xtreamity-plus-db.csv.gz';
-  static const _xtreamityAccessKey = '4b36152b6b64b8a9f4d7010b84f535fc';
-  static const _xtreamitySecretKey =
-      '7ad1ed517b6baa6af2fa00d50a1a18b0ce416bb0b6fb14f4c122a2960f1ab9bc';
-  static const _xtreamityTtl = Duration(hours: 6);
-
-  static List<IptvPortal>? _xtreamityPortals;
-  static DateTime? _xtreamityFetchedAt;
-
-  static Future<List<IptvPortal>> _getXtreamityPortals() async {
-    final cached = _xtreamityPortals;
-    final at = _xtreamityFetchedAt;
-    if (cached != null &&
-        at != null &&
-        DateTime.now().difference(at) < _xtreamityTtl) {
-      return cached;
-    }
-    try {
-      final bytes = await _xtreamityFetchObject();
-      if (bytes != null) {
-        final csv = utf8.decode(io.GZipCodec().decode(bytes),
-            allowMalformed: true);
-        final lines = csv.split('\n');
-        final portals = <IptvPortal>[];
-        for (final raw in lines) {
-          final line = raw.trim();
-          if (line.isEmpty) continue;
-          final cols = line.split(',');
-          if (cols.length < 3) continue;
-          final url = cols[0].trim();
-          final user = cols[1].trim();
-          final pass = cols[2].trim();
-          if (url.isEmpty || user.isEmpty || pass.isEmpty) continue;
-          if (!url.toLowerCase().startsWith('http')) continue;
-          portals.add(IptvPortal(
-              url: url,
-              username: user,
-              password: pass,
-              source: 'Xtreamity'));
-        }
-        // Shuffle so we don't only test a single region's portals first.
-        portals.shuffle();
-        _xtreamityPortals = portals;
-        _xtreamityFetchedAt = DateTime.now();
-        debugPrint(
-            '[Xtreamity] loaded ${portals.length} portals from R2 (shuffled)');
-        return portals;
-      }
-    } catch (e) {
-      debugPrint('[Xtreamity] fetch/parse failed: $e');
-    }
-    // Cache empty result briefly so we don't hammer R2 on every press.
-    _xtreamityPortals = const [];
-    _xtreamityFetchedAt = DateTime.now();
-    return const [];
-  }
-
-  static Future<List<int>?> _xtreamityFetchObject() async {
-    final now = DateTime.now().toUtc();
-    final amzDate = _amzDate(now); // 20260502T123045Z
-    final dateStamp = amzDate.substring(0, 8);
-    const region = 'auto';
-    const service = 's3';
-    final path = '/$_xtreamityBucket/$_xtreamityObject';
-    // R2 is S3-compatible; UNSIGNED-PAYLOAD avoids hashing the (empty) body.
-    const payloadHash = 'UNSIGNED-PAYLOAD';
-
-    final canonicalHeaders = 'host:$_xtreamityHost\n'
-        'x-amz-content-sha256:$payloadHash\n'
-        'x-amz-date:$amzDate\n';
-    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
-    final canonicalRequest =
-        'GET\n$path\n\n$canonicalHeaders\n$signedHeaders\n$payloadHash';
-
-    final scope = '$dateStamp/$region/$service/aws4_request';
-    final stringToSign = 'AWS4-HMAC-SHA256\n$amzDate\n$scope\n'
-        '${_sha256Hex(utf8.encode(canonicalRequest))}';
-
-    final kDate =
-        _hmac(utf8.encode('AWS4$_xtreamitySecretKey'), utf8.encode(dateStamp));
-    final kRegion = _hmac(kDate, utf8.encode(region));
-    final kService = _hmac(kRegion, utf8.encode(service));
-    final kSigning = _hmac(kService, utf8.encode('aws4_request'));
-    final signature = _hex(_hmac(kSigning, utf8.encode(stringToSign)));
-
-    final auth = 'AWS4-HMAC-SHA256 '
-        'Credential=$_xtreamityAccessKey/$scope, '
-        'SignedHeaders=$signedHeaders, '
-        'Signature=$signature';
-
-    final resp = await http.get(Uri.https(_xtreamityHost, path), headers: {
-      'Authorization': auth,
-      'x-amz-content-sha256': payloadHash,
-      'x-amz-date': amzDate,
-      'User-Agent': 'aws-sdk-android/2.x dart',
-    }).timeout(const Duration(seconds: 30));
-    if (resp.statusCode == 200) return resp.bodyBytes;
-    final preview = resp.body.isEmpty
-        ? ''
-        : resp.body.substring(0, math.min(200, resp.body.length));
-    debugPrint('[Xtreamity] R2 GET HTTP ${resp.statusCode}: $preview');
-    return null;
-  }
-
-  static String _amzDate(DateTime utc) {
-    String two(int n) => n.toString().padLeft(2, '0');
-    return '${utc.year}${two(utc.month)}${two(utc.day)}T'
-        '${two(utc.hour)}${two(utc.minute)}${two(utc.second)}Z';
-  }
-
-  static List<int> _hmac(List<int> key, List<int> data) =>
-      crypto.Hmac(crypto.sha256, key).convert(data).bytes;
-
-  static String _hex(List<int> bytes) =>
-      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-
-  static String _sha256Hex(List<int> bytes) =>
-      _hex(crypto.sha256.convert(bytes).bytes);
-
-  static Future<ScrapePage> _scrapeXtreamityPage(
-      int offset, int maxResults, List<IptvPortal> portals) async {
-    final end = math.min(offset + maxResults, portals.length);
-    final slice = portals.sublist(offset, end);
-    final next = end < portals.length ? 'xtreamity:$end' : null;
-    debugPrint(
-        '[Xtreamity] page offset=$offset (${slice.length} portals, next=$next)');
-    return ScrapePage(portals: slice, nextAfter: next);
-  }
 
   // ── GitHub XML2 dump source — curated portal lists, fetched FIRST. ──
   // Pulled from https://github.com/akeotaseo/world_repo/tree/main/Updater_Matrix/XML2
@@ -829,7 +678,6 @@ class IptvScraper {
 
   /// Cursor encoding for [scrapeCatalogPage]:
   ///   `null`                 → first page → start with selected source
-  ///   `'xtreamity:<offset>'` → next chunk of the R2 portal database
   ///   `'xml2:N'`             → fetch XML2 file at index N
   ///   `'reddit:'`            → start of reddit catalog
   ///   `'reddit:<token>'`     → reddit page with `after=<token>`
@@ -844,28 +692,6 @@ class IptvScraper {
   }) async {
     switch (source) {
       case CatalogSource.best:
-        // Xtreamity R2 database (pre-validated, highest signal).
-        final portals = await _getXtreamityPortals();
-        final offset = after == null
-            ? 0
-            : int.tryParse(after.substring('xtreamity:'.length)) ?? 0;
-        if (portals.isNotEmpty && offset < portals.length) {
-          return _scrapeXtreamityPage(offset, maxResults, portals);
-        }
-        return const ScrapePage(portals: [], nextAfter: null);
-
-      case CatalogSource.fastest:
-        // XML2 GitHub dumps (fast plain-text fetches).
-        final files = await _getXml2Files();
-        final idx = after == null
-            ? 0
-            : int.tryParse(after.substring('xml2:'.length)) ?? 0;
-        if (idx < files.length) {
-          return _scrapeXml2File(idx, files);
-        }
-        return const ScrapePage(portals: [], nextAfter: null);
-
-      case CatalogSource.works:
         // Reddit catalog (volatile but fresh).
         String? redditAfter;
         if (after != null && after.startsWith('reddit:')) {
@@ -876,6 +702,17 @@ class IptvScraper {
         }
         return _scrapeRedditCatalog(
             maxResults: maxResults, after: redditAfter);
+
+      case CatalogSource.works:
+        // XML2 GitHub dumps (fast plain-text fetches).
+        final files = await _getXml2Files();
+        final idx = after == null
+            ? 0
+            : int.tryParse(after.substring('xml2:'.length)) ?? 0;
+        if (idx < files.length) {
+          return _scrapeXml2File(idx, files);
+        }
+        return const ScrapePage(portals: [], nextAfter: null);
     }
   }
 
@@ -914,57 +751,157 @@ class IptvScraper {
   static Future<ScrapePage> _scrapeRedditCatalog(
       {int maxResults = 50, String? after}) async {
     final out = <String, IptvPortal>{};
-    final catalogJson = await _fetchCatalogJson(after: after);
-    if (catalogJson == null) {
-      debugPrint('[Catalog] fetch failed');
+
+    // Determine which subreddit + cursor we're on.
+    // Cursor format: 'reddit:<subIdx>:<after>' or 'reddit:<after>' (legacy).
+    var subIdx = 0;
+    String? redditAfter;
+    if (after != null && after.isNotEmpty) {
+      final parts = after.split(':');
+      if (parts.length >= 3) {
+        subIdx = int.tryParse(parts[1]) ?? 0;
+        redditAfter = parts.sublist(2).join(':');
+        if (redditAfter.isEmpty || redditAfter == 'null') redditAfter = null;
+      } else if (parts.length == 2) {
+        redditAfter = parts[1];
+        if (redditAfter.isEmpty || redditAfter == 'null') redditAfter = null;
+      }
+    }
+    if (subIdx >= _catalogSubs.length) subIdx = 0;
+    final currentSub = _catalogSubs[subIdx];
+
+    // ── Try OAuth2 JSON API first (100 posts/page, unlimited pagination) ──
+    final catalogJson = await _fetchCatalogOAuth(
+        sub: currentSub, after: redditAfter);
+    if (catalogJson != null) {
+      Map<String, dynamic>? data;
+      try {
+        data = (json.decode(catalogJson) as Map<String, dynamic>)['data']
+            as Map<String, dynamic>?;
+      } catch (e) {
+        debugPrint('[Catalog] JSON parse failed: $e');
+      }
+      if (data != null) {
+        final posts = data['children'] as List? ?? [];
+        final nextAfterRaw = data['after']?.toString();
+        final hasMore = nextAfterRaw != null &&
+            nextAfterRaw.isNotEmpty &&
+            nextAfterRaw != 'null';
+        // Build next cursor: same sub with pagination, or move to next sub.
+        String? nextAfter;
+        if (hasMore) {
+          nextAfter = 'reddit:$subIdx:$nextAfterRaw';
+        } else if (subIdx + 1 < _catalogSubs.length) {
+          nextAfter = 'reddit:${subIdx + 1}:';
+        }
+        debugPrint(
+            '[Catalog] OAuth r/$currentSub: ${posts.length} posts '
+            '(after=$redditAfter, next=$nextAfter)');
+
+        _processPosts(posts, out, maxResults);
+
+        // Follow deep links.
+        await _processDeepLinks(posts, out, maxResults);
+
+        debugPrint('[Catalog] DONE — ${out.length} unique portals');
+        return ScrapePage(portals: out.values.toList(), nextAfter: nextAfter);
+      }
+    }
+
+    // ── Fallback: RSS (25 posts, limited pagination) ──
+    debugPrint('[Catalog] OAuth failed, falling back to RSS');
+    final rssBody = await _fetchCatalogRss(sub: currentSub, after: redditAfter);
+    if (rssBody == null) {
+      debugPrint('[Catalog] RSS also failed');
+      // Try next sub if available.
+      if (subIdx + 1 < _catalogSubs.length) {
+        return ScrapePage(
+            portals: const [], nextAfter: 'reddit:${subIdx + 1}:');
+      }
       return const ScrapePage(portals: [], nextAfter: null);
     }
 
-    Map<String, dynamic>? data;
-    try {
-      data = (json.decode(catalogJson) as Map<String, dynamic>)['data']
-          as Map<String, dynamic>?;
-    } catch (e) {
-      debugPrint('[Catalog] JSON parse failed: $e');
+    final entryRe = RegExp(r'<entry>(.*?)</entry>', dotAll: true);
+    final titleRe = RegExp(r'<title[^>]*>(.*?)</title>', dotAll: true);
+    final contentRe = RegExp(r'<content[^>]*>(.*?)</content>', dotAll: true);
+    final idRe = RegExp(r'<id>(t3_[^<]+)</id>');
+
+    final entries = entryRe.allMatches(rssBody).toList();
+    final postIds = idRe.allMatches(rssBody).map((m) => m.group(1)!).toList();
+    final lastPostId = postIds.isNotEmpty ? postIds.last : null;
+    String? nextAfter;
+    if (lastPostId != null && entries.length >= 20) {
+      nextAfter = 'reddit:$subIdx:$lastPostId';
+    } else if (subIdx + 1 < _catalogSubs.length) {
+      nextAfter = 'reddit:${subIdx + 1}:';
     }
-    if (data == null) return const ScrapePage(portals: [], nextAfter: null);
+    debugPrint('[Catalog] RSS r/$currentSub: ${entries.length} entries');
 
-    final posts = data['children'] as List?;
-    if (posts == null) return const ScrapePage(portals: [], nextAfter: null);
-    final nextAfterRaw = data['after']?.toString();
-    final nextAfterToken =
-        (nextAfterRaw == null || nextAfterRaw.isEmpty || nextAfterRaw == 'null')
-            ? null
-            : nextAfterRaw;
-    // Re-encode reddit cursor so the controller's opaque pagination keeps
-    // working across phases.
-    final nextAfter =
-        nextAfterToken == null ? null : 'reddit:$nextAfterToken';
-    debugPrint('[Catalog] ${posts.length} posts (after=$after, next=$nextAfterToken)');
+    var postIdx = 0;
+    for (final entry in entries) {
+      postIdx++;
+      if (out.length >= maxResults) break;
+      final entryText = entry.group(1)!;
+      final titleMatch = titleRe.firstMatch(entryText);
+      final title = _decodeXmlEntities(titleMatch?.group(1) ?? '');
+      final contentMatch = contentRe.firstMatch(entryText);
+      final rawContent = _decodeXmlEntities(contentMatch?.group(1) ?? '');
+      final body = '$title ${rawContent.replaceAll(
+        RegExp(r'<(?:p|br|div|li|h\d)[^>]*>', caseSensitive: false),
+        '\n',
+      ).replaceAll(RegExp(r'<[^>]+>'), ' ').replaceAll(RegExp(r'\s+'), ' ')}'
+          .trim();
+      _processPostBody(body, title, postIdx, out, maxResults);
+    }
 
+    debugPrint('[Catalog] DONE — ${out.length} unique portals');
+    return ScrapePage(portals: out.values.toList(), nextAfter: nextAfter);
+  }
+
+  /// Extract portals from OAuth2 JSON posts.
+  static void _processPosts(
+      List posts, Map<String, IptvPortal> out, int maxResults) {
     var postIdx = 0;
     for (final post in posts) {
       postIdx++;
       if (out.length >= maxResults) break;
-      final pdata = ((post as Map<String, dynamic>)['data']) as Map<String, dynamic>?;
+      final pdata =
+          ((post as Map<String, dynamic>)['data']) as Map<String, dynamic>?;
       if (pdata == null) continue;
       final title = pdata['title']?.toString() ?? '';
       final body = '$title ${pdata['selftext']?.toString() ?? ''}'.trim();
-      debugPrint('[Catalog] post[$postIdx] '
-          "'${title.length > 60 ? '${title.substring(0, 60)}…' : title}'"
-          ' bodyLen=${body.length}');
+      _processPostBody(body, title, postIdx, out, maxResults);
+    }
+  }
 
-      // 1. Direct extraction from post body
-      final direct = _extractPortals(body, 'Catalog');
-      if (direct.isNotEmpty) {
-        debugPrint('[Catalog]   direct: ${direct.length}');
-      }
-      for (final p in direct) {
-        _addPortal(out, p, maxResults);
-      }
+  /// Process a single post body: extract direct portals + collect deep links.
+  static void _processPostBody(String body, String title, int postIdx,
+      Map<String, IptvPortal> out, int maxResults) {
+    debugPrint('[Catalog] post[$postIdx] '
+        "'${title.length > 60 ? '${title.substring(0, 60)}…' : title}'"
+        ' bodyLen=${body.length}');
+
+    // 1. Direct extraction.
+    final direct = _extractPortals(body, 'Catalog');
+    if (direct.isNotEmpty) {
+      debugPrint('[Catalog]   direct: ${direct.length}');
+    }
+    for (final p in direct) {
+      _addPortal(out, p, maxResults);
+    }
+  }
+
+  /// Follow base64 and paste deep links from OAuth2 JSON posts.
+  static Future<void> _processDeepLinks(
+      List posts, Map<String, IptvPortal> out, int maxResults) async {
+    for (final post in posts) {
       if (out.length >= maxResults) break;
+      final pdata =
+          ((post as Map<String, dynamic>)['data']) as Map<String, dynamic>?;
+      if (pdata == null) continue;
+      final title = pdata['title']?.toString() ?? '';
+      final body = '$title ${pdata['selftext']?.toString() ?? ''}'.trim();
 
-      // 2. Decode base64 deep links
       final deepLinks = <String>[];
       for (final m in _b64.allMatches(body)) {
         try {
@@ -978,13 +915,9 @@ class IptvScraper {
           }
         } catch (_) {}
       }
-
-      // 3. Raw paste links in body
       for (final m in _rawPaste.allMatches(body)) {
         deepLinks.add(m.group(0)!);
       }
-
-      // 4. Fetch up to 4 deep links per post
       final unique = deepLinks.toSet().take(4);
       for (final dl in unique) {
         if (out.length >= maxResults) break;
@@ -995,15 +928,13 @@ class IptvScraper {
           continue;
         }
         final found = _extractPortals(text, 'Catalog (deep)');
-        debugPrint('[Catalog]     → ${text.length} chars, ${found.length} portals');
+        debugPrint(
+            '[Catalog]     → ${text.length} chars, ${found.length} portals');
         for (final p in found) {
           _addPortal(out, p, maxResults);
         }
       }
     }
-
-    debugPrint('[Catalog] DONE — ${out.length} unique portals');
-    return ScrapePage(portals: out.values.toList(), nextAfter: nextAfter);
   }
 
   static void _addPortal(
@@ -1155,55 +1086,129 @@ class IptvScraper {
     }
   }
 
-  /// Fetches the subreddit listing as JSON. Reddit 403s most unauthenticated
-  /// clients, so we do one quick direct attempt and then go through public
-  /// fetch proxies (server-side fetch, bypasses Reddit's client-IP blocks).
-  /// Accepts only responses whose first non-whitespace byte is `{` or `[`.
-  static Future<String?> _fetchCatalogJson({String? after}) async {
-    String buildTarget(String host) {
-      final base = '$host/r/$_catalogSub/new/.json?limit=100&sort=new';
-      return (after == null || after.isEmpty) ? base : '$base&after=$after';
+  /// Decode common XML/HTML entities in RSS content.
+  static String _decodeXmlEntities(String s) => s
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&#32;', ' ');
+
+  // ── Reddit OAuth2 "installed_client" anonymous auth ──────────────────
+  // Grants an anonymous bearer token without needing a Reddit account.
+  // Token is cached and auto-refreshed. Client IDs rotate on failure.
+  static Future<String?> _getOAuthToken() async {
+    // Return cached token if still valid.
+    if (_oauthToken != null &&
+        _oauthTokenExpiry != null &&
+        DateTime.now().isBefore(_oauthTokenExpiry!)) {
+      return _oauthToken;
     }
-
-    bool looksJson(String body) {
-      final t = body.trimLeft();
-      return t.startsWith('{') || t.startsWith('[');
-    }
-
-    final target = buildTarget(_catalogDirectHost);
-
-    // 1. One direct attempt with Googlebot UA.
-    debugPrint('[Catalog] GET ${_redact(target)} (direct)');
-    try {
-      final resp = await http.get(Uri.parse(target), headers: {
-        'User-Agent': _catalogDirectUa,
-        'Accept': 'application/json',
-      }).timeout(const Duration(seconds: 8));
-      if (resp.statusCode == 200 && looksJson(resp.body)) return resp.body;
-      debugPrint('[Catalog]   direct ${resp.statusCode} len=${resp.body.length}');
-    } catch (e) {
-      debugPrint('[Catalog]   direct failed: $e');
-    }
-
-    // 2. Proxy attempts.
-    final encoded = Uri.encodeComponent(target);
-    for (final tmpl in _fetchProxies) {
-      final proxyUrl = tmpl.replaceFirst('{URL}', encoded);
-      debugPrint('[Catalog] proxy ${_redact(proxyUrl)}');
+    // Try each client ID until one works.
+    for (var i = 0; i < _oauthClientIds.length; i++) {
+      final idx = (_oauthClientIdx + i) % _oauthClientIds.length;
+      final clientId = _oauthClientIds[idx];
       try {
-        final resp = await http.get(Uri.parse(proxyUrl), headers: {
-          'User-Agent': _ua,
-          'Accept': 'application/json, text/plain, */*',
-        }).timeout(const Duration(seconds: 20));
-        if (resp.statusCode != 200) {
-          debugPrint('[Catalog]   proxy ${resp.statusCode}');
-          continue;
+        final resp = await http.post(
+          Uri.parse('https://www.reddit.com/api/v1/access_token'),
+          headers: {
+            'User-Agent': _oauthUa,
+            'Authorization':
+                'Basic ${base64.encode(utf8.encode('$clientId:'))}',
+          },
+          body: {
+            'grant_type':
+                'https://oauth.reddit.com/grants/installed_client',
+            'device_id': 'DO_NOT_TRACK_THIS_DEVICE',
+          },
+        ).timeout(const Duration(seconds: 8));
+        if (resp.statusCode == 200) {
+          final data = json.decode(resp.body) as Map<String, dynamic>;
+          final token = data['access_token'] as String?;
+          final expiresIn = data['expires_in'] as int? ?? 3600;
+          if (token != null && token.isNotEmpty) {
+            _oauthToken = token;
+            // Refresh 60s early to avoid edge-case expiry during requests.
+            _oauthTokenExpiry = DateTime.now()
+                .add(Duration(seconds: expiresIn - 60));
+            _oauthClientIdx = idx;
+            debugPrint('[Catalog] OAuth token obtained (client #$idx)');
+            return token;
+          }
         }
-        if (looksJson(resp.body)) return resp.body;
-        debugPrint('[Catalog]   proxy non-JSON (len=${resp.body.length})');
+        debugPrint(
+            '[Catalog] OAuth auth failed (client #$idx): ${resp.statusCode}');
       } catch (e) {
-        debugPrint('[Catalog]   proxy failed: $e');
+        debugPrint('[Catalog] OAuth auth error (client #$idx): $e');
       }
+    }
+    // All client IDs failed — rotate for next attempt.
+    _oauthClientIdx =
+        (_oauthClientIdx + 1) % _oauthClientIds.length;
+    _oauthToken = null;
+    _oauthTokenExpiry = null;
+    return null;
+  }
+
+  /// Fetches subreddit listing via OAuth2 JSON API.
+  /// Returns raw JSON string or null on failure.
+  static Future<String?> _fetchCatalogOAuth(
+      {required String sub, String? after}) async {
+    final token = await _getOAuthToken();
+    if (token == null) return null;
+
+    final base =
+        'https://oauth.reddit.com/r/$sub/new?limit=100&sort=new&raw_json=1';
+    final url = (after == null || after.isEmpty)
+        ? base
+        : '$base&after=$after';
+
+    debugPrint('[Catalog] OAuth GET r/$sub (after=$after)');
+    try {
+      final resp = await http.get(Uri.parse(url), headers: {
+        'User-Agent': _oauthUa,
+        'Authorization': 'Bearer $token',
+      }).timeout(const Duration(seconds: 12));
+      if (resp.statusCode == 200) {
+        final t = resp.body.trimLeft();
+        if (t.startsWith('{') || t.startsWith('[')) return resp.body;
+      }
+      if (resp.statusCode == 401 || resp.statusCode == 403) {
+        // Token expired or revoked — clear cache so next call re-auths.
+        _oauthToken = null;
+        _oauthTokenExpiry = null;
+      }
+      debugPrint(
+          '[Catalog]   OAuth ${resp.statusCode} len=${resp.body.length}');
+    } catch (e) {
+      debugPrint('[Catalog]   OAuth failed: $e');
+    }
+    return null;
+  }
+
+  /// Fetches subreddit listing as RSS (Atom). Fallback when OAuth fails.
+  static Future<String?> _fetchCatalogRss(
+      {required String sub, String? after}) async {
+    final base =
+        'https://www.reddit.com/r/$sub/new/.rss?limit=25';
+    final url = (after == null || after.isEmpty)
+        ? base
+        : '$base&after=$after';
+
+    debugPrint('[Catalog] GET RSS ${_redact(url)}');
+    try {
+      final resp = await http.get(Uri.parse(url), headers: {
+        'User-Agent': _oauthUa,
+        'Accept': 'application/atom+xml, application/xml, */*',
+      }).timeout(const Duration(seconds: 15));
+      if (resp.statusCode == 200 && resp.body.contains('<entry>')) {
+        return resp.body;
+      }
+      debugPrint(
+          '[Catalog]   RSS ${resp.statusCode} len=${resp.body.length}');
+    } catch (e) {
+      debugPrint('[Catalog]   RSS failed: $e');
     }
     return null;
   }
