@@ -78,6 +78,52 @@ class EpisodeWatchedService {
     await _save();
   }
 
+  /// Set watched with a timestamp, without triggering external sync (used during import).
+  Future<void> setWatchedLocalWithTimestamp(
+      int tmdbId, int season, int episode, bool watched, String? watchedAt) async {
+    final map = await _load();
+    final id = _id(tmdbId, season, episode);
+    map[id] = watched;
+    await _save();
+    // Store timestamp separately
+    if (watchedAt != null && watched) {
+      await _saveTimestamp(id, watchedAt);
+    }
+  }
+
+  static const String _timestampKey = 'episodes_watched_timestamps';
+  Map<String, String>? _timestampCache;
+
+  Future<Map<String, String>> _loadTimestamps() async {
+    if (_timestampCache != null) return _timestampCache!;
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_timestampKey);
+    if (raw != null) {
+      final decoded = json.decode(raw) as Map<String, dynamic>;
+      _timestampCache = decoded.map((k, v) => MapEntry(k, v.toString()));
+    } else {
+      _timestampCache = {};
+    }
+    return _timestampCache!;
+  }
+
+  Future<void> _saveTimestamp(String id, String watchedAt) async {
+    final map = await _loadTimestamps();
+    map[id] = watchedAt;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_timestampKey, json.encode(map));
+  }
+
+  Future<String?> getTimestamp(int tmdbId, int season, int episode) async {
+    final map = await _loadTimestamps();
+    return map[_id(tmdbId, season, episode)];
+  }
+
+  /// Get all stored timestamps. Used by Trakt export for deduplication.
+  Future<Map<String, String>> getAllTimestamps() async {
+    return await _loadTimestamps();
+  }
+
   // ── Sync to Trakt & Simkl ──────────────────────────────────────────────
   void _syncEpisodeState(int tmdbId, int season, int episode, bool watched) {
     // Trakt

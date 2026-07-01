@@ -883,7 +883,50 @@ class _HomeScreenState extends State<HomeScreen> with AutomaticKeepAliveClientMi
               // Continue Watching — wide cinematic hero card for the most recent
               SliverToBoxAdapter(
                 child: RepaintBoundary(
-                  child: _ContinueWatchingHero(onOpen: _openDetails),
+                  child: _ContinueWatchingHero(
+                    onOpen: _openDetails,
+                    onResume: (item) async {
+                      final tmdbId = item['tmdbId'] as int?;
+                      if (tmdbId == null) return;
+                      final title = (item['title'] as String?) ?? '';
+                      final posterPath = (item['posterPath'] as String?) ?? '';
+                      final season = item['season'] as int?;
+                      final episode = item['episode'] as int?;
+                      final position = (item['position'] as int?) ?? 0;
+                      final mediaType = (item['mediaType'] as String?) ??
+                          (season != null ? 'tv' : 'movie');
+                      final startPos = Duration(milliseconds: position);
+                      final movie = Movie(
+                        id: tmdbId,
+                        title: title,
+                        posterPath: posterPath,
+                        backdropPath: '',
+                        overview: '',
+                        releaseDate: '',
+                        voteAverage: 0,
+                        mediaType: mediaType,
+                        genres: [],
+                        imdbId: item['imdbId'] as String?,
+                      );
+                      final isStreaming = await SettingsService().isStreamingModeEnabled();
+                      if (!mounted) return;
+                      Navigator.push(context, MaterialPageRoute(
+                        builder: (_) => isStreaming
+                            ? StreamingDetailsScreen(
+                                movie: movie,
+                                initialSeason: season,
+                                initialEpisode: episode,
+                                startPosition: startPos,
+                              )
+                            : DetailsScreen(
+                                movie: movie,
+                                initialSeason: season,
+                                initialEpisode: episode,
+                                startPosition: startPos,
+                              ),
+                      ));
+                    },
+                  ),
                 ),
               ),
 
@@ -3434,7 +3477,8 @@ class _StatTile extends StatelessWidget {
 
 class _ContinueWatchingHero extends StatefulWidget {
   final Function(Movie) onOpen;
-  const _ContinueWatchingHero({required this.onOpen});
+  final Function(Map<String, dynamic>)? onResume;
+  const _ContinueWatchingHero({required this.onOpen, this.onResume});
 
   @override
   State<_ContinueWatchingHero> createState() => _ContinueWatchingHeroState();
@@ -3514,6 +3558,14 @@ class _ContinueWatchingHeroState extends State<_ContinueWatchingHero> {
                 borderRadius: BorderRadius.circular(20),
                 onTap: () {
                   if (tmdbId == null) return;
+                  // If this is a trakt_import or has season/episode data,
+                  // route through the resume flow so we get source selection
+                  final method = item['method'] as String? ?? '';
+                  if (widget.onResume != null &&
+                      (method == 'trakt_import' || season != null)) {
+                    widget.onResume!(item);
+                    return;
+                  }
                   final movie = Movie(
                     id: tmdbId,
                     title: title,

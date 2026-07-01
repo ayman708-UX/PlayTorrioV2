@@ -1227,14 +1227,20 @@ class TraktService {
 
     int imported = 0;
     try {
-      // Single API call — includes full season/episode data by default
       final resp = await http.get(
-        Uri.parse('$_baseUrl/sync/watched/shows'),
+        Uri.parse('$_baseUrl/sync/watched/shows?extended=noseasons'),
         headers: _authHeaders(token),
       );
       if (resp.statusCode != 200) return 0;
 
-      final List shows = json.decode(resp.body);
+      // Also fetch full watched data with seasons for timestamp extraction
+      final fullResp = await http.get(
+        Uri.parse('$_baseUrl/sync/watched/shows'),
+        headers: _authHeaders(token),
+      );
+      if (fullResp.statusCode != 200) return 0;
+
+      final List shows = json.decode(fullResp.body);
       for (final show in shows) {
         final showData = show['show'] as Map<String, dynamic>? ?? {};
         final ids = showData['ids'] as Map<String, dynamic>? ?? {};
@@ -1249,9 +1255,12 @@ class TraktService {
           for (final ep in episodes) {
             final eNum = ep['number'] as int? ?? 0;
             if (eNum == 0) continue;
+            final watchedAt = ep['last_watched_at']?.toString();
             final already = await EpisodeWatchedService().isWatched(tmdbId, sNum, eNum);
             if (!already) {
-              await EpisodeWatchedService().setWatchedLocal(tmdbId, sNum, eNum, true);
+              await EpisodeWatchedService().setWatchedLocalWithTimestamp(
+                tmdbId, sNum, eNum, true, watchedAt,
+              );
               imported++;
             }
           }
@@ -1264,16 +1273,56 @@ class TraktService {
     return imported;
   }
 
-  /// Export all locally marked watched episodes to Trakt history.
-  Future<int> exportWatchedEpisodes() async {
+  /// Export locally-watched episodes to Trakt history.
+  /// 
+  /// Safe & idempotent: fetches Trakt's current watched state first,
+  /// only pushes episodes that Trakt doesn't already have, and always
+  /// includes an explicit `watched_at` timestamp.
+  ///
+  /// Set [dryRun] to true to log what would be sent without making any
+  /// write calls.
+  Future<int> exportWatchedEpisodes({bool dryRun = false}) async {
     final token = await _getValidToken();
     if (token == null) return 0;
 
+    // ── Step 1: Fetch what Trakt already has ──────────────────────────────
+    final Set<String> traktHas = {}; // "tmdbId_S_E"
+    try {
+      final resp = await http.get(
+        Uri.parse('$_baseUrl/sync/watched/shows'),
+        headers: _authHeaders(token),
+      );
+      if (resp.statusCode == 200) {
+        final List shows = json.decode(resp.body);
+        for (final show in shows) {
+          final ids = (show['show'] as Map?)?['ids'] as Map? ?? {};
+          final tmdbId = ids['tmdb'] as int?;
+          if (tmdbId == null) continue;
+          for (final s in (show['seasons'] as List? ?? [])) {
+            final sNum = s['number'] as int? ?? 0;
+            for (final ep in (s['episodes'] as List? ?? [])) {
+              final eNum = ep['number'] as int? ?? 0;
+              traktHas.add('${tmdbId}_S${sNum}_E$eNum');
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[Trakt] Failed to fetch existing watched state: $e');
+      // Abort — we can't safely deduplicate
+      return 0;
+    }
+    debugPrint('[Trakt] Trakt already has ${traktHas.length} watched episodes');
+
+    // ── Step 2: Load local cache and filter ───────────────────────────────
     final cache = await _getEpisodeWatchedCache();
     if (cache.isEmpty) return 0;
 
-    // Group by tmdbId
-    final Map<int, List<Map<String, int>>> grouped = {};
+    // Read timestamps from the enhanced cache
+    final timestampCache = await EpisodeWatchedService().getAllTimestamps();
+
+    final Map<int, List<Map<String, dynamic>>> grouped = {};
+    int skipped = 0;
     for (final key in cache.keys) {
       if (cache[key] != true) continue;
       final match = RegExp(r'^(\d+)_S(\d+)_E(\d+)$').firstMatch(key);
@@ -1281,42 +1330,100 @@ class TraktService {
       final tmdbId = int.parse(match.group(1)!);
       final season = int.parse(match.group(2)!);
       final episode = int.parse(match.group(3)!);
-      grouped.putIfAbsent(tmdbId, () => []);
-      grouped[tmdbId]!.add({'season': season, 'episode': episode});
-    }
 
-    int exported = 0;
-    for (final entry in grouped.entries) {
-      // Group episodes by season
-      final Map<int, List<int>> seasonEps = {};
-      for (final ep in entry.value) {
-        seasonEps.putIfAbsent(ep['season']!, () => []);
-        seasonEps[ep['season']!]!.add(ep['episode']!);
+      // Skip if Trakt already has this episode
+      if (traktHas.contains(key)) {
+        skipped++;
+        continue;
       }
 
-      final seasons = seasonEps.entries.map((se) => {
-        'number': se.key,
-        'episodes': se.value.map((e) => {'number': e}).toList(),
-      }).toList();
+      final watchedAt = timestampCache[key] ??
+          DateTime.now().toUtc().toIso8601String();
 
-      try {
-        final resp = await http.post(
-          Uri.parse('$_baseUrl/sync/history'),
-          headers: _authHeaders(token),
-          body: json.encode({
-            'shows': [
-              {
-                'ids': {'tmdb': entry.key},
-                'seasons': seasons,
-              }
-            ]
-          }),
-        );
-        if (resp.statusCode == 200 || resp.statusCode == 201) {
-          exported += entry.value.length;
+      grouped.putIfAbsent(tmdbId, () => []);
+      grouped[tmdbId]!.add({
+        'season': season,
+        'episode': episode,
+        'watched_at': watchedAt,
+      });
+    }
+
+    final totalToSync = grouped.values.fold<int>(0, (s, v) => s + v.length);
+    debugPrint('[Trakt] Export: $totalToSync new, $skipped already on Trakt');
+
+    if (totalToSync == 0) return 0;
+
+    // ── Step 3: Dry-run gate ──────────────────────────────────────────────
+    if (dryRun) {
+      for (final entry in grouped.entries) {
+        for (final ep in entry.value) {
+          debugPrint('[Trakt DRY-RUN] Would sync: tmdb=${entry.key} '
+              'S${ep['season']}E${ep['episode']} watched_at=${ep['watched_at']}');
         }
-      } catch (e) {
-        debugPrint('[Trakt] Export watched episodes error: $e');
+      }
+      debugPrint('[Trakt DRY-RUN] Total: $totalToSync episodes (not sent)');
+      return totalToSync;
+    }
+
+    // ── Step 4: Push in batches ───────────────────────────────────────────
+    int exported = 0;
+    const batchSize = 100;
+    for (final entry in grouped.entries) {
+      final allEps = entry.value;
+
+      // Chunk the episodes list into batches of batchSize
+      for (var i = 0; i < allEps.length; i += batchSize) {
+        final batch = allEps.sublist(
+          i, (i + batchSize).clamp(0, allEps.length),
+        );
+
+        // Group batch by season
+        final Map<int, List<Map<String, dynamic>>> seasonEps = {};
+        for (final ep in batch) {
+          final s = ep['season'] as int;
+          seasonEps.putIfAbsent(s, () => []);
+          seasonEps[s]!.add({
+            'number': ep['episode'],
+            'watched_at': ep['watched_at'],
+          });
+        }
+
+        final seasons = seasonEps.entries.map((se) => {
+          'number': se.key,
+          'episodes': se.value,
+        }).toList();
+
+        try {
+          final resp = await http.post(
+            Uri.parse('$_baseUrl/sync/history'),
+            headers: _authHeaders(token),
+            body: json.encode({
+              'shows': [
+                {
+                  'ids': {'tmdb': entry.key},
+                  'seasons': seasons,
+                }
+              ]
+            }),
+          );
+          if (resp.statusCode == 200 || resp.statusCode == 201) {
+            exported += batch.length;
+          } else if (resp.statusCode == 429) {
+            // Rate limited — wait and retry
+            final retryAfter = int.tryParse(
+                resp.headers['retry-after'] ?? '') ?? 2;
+            debugPrint('[Trakt] Rate limited, waiting ${retryAfter}s');
+            await Future.delayed(Duration(seconds: retryAfter));
+            i -= batchSize; // retry this batch
+          }
+        } catch (e) {
+          debugPrint('[Trakt] Export watched episodes error: $e');
+        }
+
+        // Small delay between batches to avoid rate limiting
+        if (i + batchSize < allEps.length) {
+          await Future.delayed(const Duration(milliseconds: 200));
+        }
       }
     }
     debugPrint('[Trakt] Exported $exported watched episodes');
