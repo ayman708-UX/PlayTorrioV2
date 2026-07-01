@@ -486,6 +486,9 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
   // ── Subtitles ────────────────────────────────────────────────────────────
   List<Map<String, dynamic>> _externalSubtitles = [];
   bool _isFetchingSubs = false;
+  /// When true, the current subtitle is ASS/SSA or an image-based format (PGS/VobSub).
+  /// mpv renders it directly on the video frame, so the custom Flutter overlay is hidden.
+  bool _isNativeSubtitle = false;
   String? _selectedExternalSubUrl;
   /// Currently opened language-folder key in the subtitle picker, or null
   /// when the picker shows the folder list. Persists across menu open/close.
@@ -563,8 +566,14 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
       configuration: const PlayerConfiguration(
         // Silence noisy logs; use MPVLogLevel.warn for prod
         logLevel: MPVLogLevel.warn,
-        // We render our own subtitles via Flutter SubtitleViewConfiguration
-        libass: false,
+        // libass enabled so ASS/SSA subtitles render natively on the video.
+        // For SRT/VTT we dynamically set sub-visibility=no so our custom
+        // Flutter overlay still handles those.
+        libass: true,
+        // On Android, libass cannot access system fonts via fontconfig.
+        // We must bundle a default font in assets and provide it here.
+        libassAndroidFont: 'assets/fonts/Roboto-Regular.ttf',
+        libassAndroidFontName: 'Roboto',
       ),
     );
 
@@ -1285,49 +1294,79 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
     }
   }
 
+  /// Checks if [track] is an ASS/SSA or image-based subtitle (PGS/VobSub) and toggles mpv's
+  /// `sub-visibility` accordingly. Native tracks render directly onto the video frame,
+  /// so the custom Flutter overlay hides itself. For SRT/VTT, sub-visibility is turned off
+  /// so only the Flutter overlay draws text.
+  void _updateSubVisibility(SubtitleTrack track) {
+    final codec = track.codec?.toLowerCase() ?? '';
+    final isNativeCodec = codec.contains('ass') || codec.contains('ssa') ||
+        codec.contains('pgs') || codec.contains('dvd') || codec.contains('dvb') || codec.contains('vobsub');
+    // Also check the track title/id for .ass/.ssa extension (file picker)
+    final title = (track.title ?? track.id).toLowerCase();
+    final looksAss = title.endsWith('.ass') || title.endsWith('.ssa');
+    final shouldUseNative = isNativeCodec || looksAss;
+
+    if (shouldUseNative != _isNativeSubtitle) {
+      setState(() => _isNativeSubtitle = shouldUseNative);
+    }
+    if (_player.platform is NativePlayer) {
+      (_player.platform as NativePlayer)
+          .setProperty('sub-visibility', shouldUseNative ? 'yes' : 'no');
+    }
+  }
+
   Future<void> _configureMpvProperties() async {
     if (_player.platform is! NativePlayer) return;
     final mpv = _player.platform as NativePlayer;
 
+    Future<void> safeSet(String key, String val) async {
+      try {
+        await mpv.setProperty(key, val);
+      } catch (e) {
+        debugPrint('[Player] Warning: failed to set mpv property $key=$val: $e');
+      }
+    }
+
     // ── Decoding ─────────────────────────────────────────────────────────
     // auto-safe: tries whitelisted GPU decoders, falls back gracefully.
     // This is the officially recommended hwdec mode by mpv developers.
-    await mpv.setProperty('hwdec', _hwDecMode.mpvValue);
+    await safeSet('hwdec', _hwDecMode.mpvValue);
 
     // Zero-copy direct rendering from decoder to GPU texture when possible.
     // Reduces RAM usage and improves throughput, especially on 4K/HEVC.
-    await mpv.setProperty('vd-lavc-dr', 'yes');
+    await safeSet('vd-lavc-dr', 'yes');
 
     // Let mpv pick the optimal thread count automatically (0 = auto).
-    await mpv.setProperty('vd-lavc-threads', '0');
+    await safeSet('vd-lavc-threads', '0');
 
     // ── Audio Codec Fallback ──────────────────────────────────────────────
     // Continue playback even if audio codec is unsupported (e.g., TrueHD).
     // User can switch to alternate audio track from the menu.
-    await mpv.setProperty('ad-lavc-downmix', 'no');
-    await mpv.setProperty('audio-fallback-to-null', 'yes');
+    await safeSet('ad-lavc-downmix', 'no');
+    await safeSet('audio-fallback-to-null', 'yes');
 
     // Disable built-in OSD / subtitle rendering – Flutter renders them.
-    await mpv.setProperty('sub-visibility', 'no');
-    await mpv.setProperty('sub-auto', 'all');
+    await safeSet('sub-visibility', 'no');
+    await safeSet('sub-auto', 'all');
 
     // ── Video Sync & Smoothness ───────────────────────────────────────────
     // display-resample: syncs to the monitor's refresh rate, eliminates judder.
     // This is the best sync mode for desktop displays.
-    await mpv.setProperty('video-sync', 'display-resample');
+    await safeSet('video-sync', 'display-resample');
 
     // Temporal interpolation to smooth out frame pacing between display frames.
     // Significantly reduces judder on 24fps content on 60Hz+ monitors.
-    await mpv.setProperty('interpolation', 'yes');
-    await mpv.setProperty('tscale', 'oversample'); // lightweight interpolation
+    await safeSet('interpolation', 'yes');
+    await safeSet('tscale', 'oversample'); // lightweight interpolation
 
     // ── Adaptive Streaming (HLS/DASH) ─────────────────────────────────────
     // Always pick the highest bitrate variant in multi-quality playlists.
-    await mpv.setProperty('hls-bitrate', 'max');
+    await safeSet('hls-bitrate', 'max');
 
     // ── Network / Streaming ───────────────────────────────────────────────
-    await mpv.setProperty('network-timeout', '30');
-    await mpv.setProperty('tls-verify', 'no'); // for self-signed / CDN certs
+    await safeSet('network-timeout', '30');
+    await safeSet('tls-verify', 'no'); // for self-signed / CDN certs
 
     final isTorrent = widget.magnetLink != null;
     if (isTorrent) {
@@ -1335,44 +1374,44 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
       // forward window is enough and keeps memory pressure low. We also
       // disable cache-pause so playback keeps moving when the demuxer
       // briefly drains while waiting on the next piece.
-      await mpv.setProperty('cache', 'yes');
-      await mpv.setProperty('network-timeout', '15');
-      await mpv.setProperty('force-seekable', 'yes');
-      await mpv.setProperty('hr-seek', 'yes');
-      await mpv.setProperty('hr-seek-framedrop', 'no');
+      await safeSet('cache', 'yes');
+      await safeSet('network-timeout', '15');
+      await safeSet('force-seekable', 'yes');
+      await safeSet('hr-seek', 'yes');
+      await safeSet('hr-seek-framedrop', 'no');
     } else {
       // Cache: 300 MB in memory, read 120 s ahead.
       // This dramatically reduces rebuffering on variable-bitrate streams.
-      await mpv.setProperty('cache', 'yes');
-      await mpv.setProperty('cache-secs', '120');
-      await mpv.setProperty('demuxer-max-bytes', '300MiB');
-      await mpv.setProperty('demuxer-readahead-secs', '120');
+      await safeSet('cache', 'yes');
+      await safeSet('cache-secs', '120');
+      await safeSet('demuxer-max-bytes', '300MiB');
+      await safeSet('demuxer-readahead-secs', '120');
 
       // How far back the demuxer keeps decoded data (for backward seeks).
-      await mpv.setProperty('demuxer-max-back-bytes', '50MiB');
+      await safeSet('demuxer-max-back-bytes', '50MiB');
     }
 
     // Prevent yt-dlp from being invoked (we supply our own URL).
-    await mpv.setProperty('ytdl', 'no');
+    await safeSet('ytdl', 'no');
 
     // ── Volume ────────────────────────────────────────────────────────────
     // Allow boosting volume above 100% (up to 150%) for quiet sources.
-    await mpv.setProperty('volume-max', '150');
+    await safeSet('volume-max', '150');
 
     // ── External Audio Track ──────────────────────────────────────────────
     if (widget.audioUrl != null) {
-      await mpv.setProperty('audio-file', widget.audioUrl!);
+      await safeSet('audio-file', widget.audioUrl!);
     }
 
     // ── HTTP Headers ──────────────────────────────────────────────────────
     if (widget.headers != null) {
       final referer =
           widget.headers!['Referer'] ?? widget.headers!['referer'];
-      if (referer != null) await mpv.setProperty('referrer', referer);
+      if (referer != null) await safeSet('referrer', referer);
 
       final ua =
           widget.headers!['User-Agent'] ?? widget.headers!['user-agent'];
-      if (ua != null) await mpv.setProperty('user-agent', ua);
+      if (ua != null) await safeSet('user-agent', ua);
     }
 
     // ── Resume Position ──────────────────────────────────────────────────
@@ -1382,7 +1421,7 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
     // initialised.
     if (widget.startPosition != null && !_hasInitialSeek) {
       final secs = widget.startPosition!.inMilliseconds / 1000.0;
-      await mpv.setProperty('start', '+${secs.toStringAsFixed(3)}');
+      await safeSet('start', '+${secs.toStringAsFixed(3)}');
     }
   }
 
@@ -1476,11 +1515,13 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
           '${dir.path}/playtorrio_sub_${DateTime.now().millisecondsSinceEpoch}_$safeLang.srt');
       await file.writeAsBytes(res.bodyBytes);
       final uri = Uri.file(file.path).toString();
-      _player.setSubtitleTrack(SubtitleTrack.uri(
+      final track = SubtitleTrack.uri(
         uri,
         title: s['display'],
         language: s['language'],
-      ));
+      );
+      _player.setSubtitleTrack(track);
+      _updateSubVisibility(track);
       if (mounted) {
         setState(() => _selectedExternalSubUrl = url);
       }
@@ -1704,6 +1745,7 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
                           : null,
                       onTap: () {
                         _player.setSubtitleTrack(SubtitleTrack.no());
+                        _updateSubVisibility(SubtitleTrack.no());
                         if (mounted) {
                           setState(() => _selectedExternalSubUrl = null);
                         }
@@ -1725,10 +1767,19 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
                           final file = File(result.files.single.path!);
                           final content = await file.readAsString();
                           final name = result.files.single.name;
-                          _player.setSubtitleTrack(SubtitleTrack.data(
-                              content, title: name, language: 'und'));
-                          if (mounted) {
-                            setState(() => _selectedExternalSubUrl = null);
+                          final subTrack = SubtitleTrack.data(
+                              content, title: name, language: 'und');
+                          _player.setSubtitleTrack(subTrack);
+                          // Detect ASS from file extension since data tracks have no codec
+                          final isAssFile = name.toLowerCase().endsWith('.ass') ||
+                              name.toLowerCase().endsWith('.ssa');
+                          setState(() {
+                            _selectedExternalSubUrl = null;
+                            _isNativeSubtitle = isAssFile;
+                          });
+                          if (_player.platform is NativePlayer) {
+                            (_player.platform as NativePlayer)
+                                .setProperty('sub-visibility', isAssFile ? 'yes' : 'no');
                           }
                           if (context.mounted) Navigator.pop(context);
                         }
@@ -1762,6 +1813,7 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
                               : null,
                           onTap: () {
                             _player.setSubtitleTrack(t);
+                            _updateSubVisibility(t);
                             if (mounted) {
                               setState(() => _selectedExternalSubUrl = null);
                             }
@@ -3295,36 +3347,34 @@ class _DesktopPlayerScreenState extends State<DesktopPlayerScreen>
                 // Auto-scales relative to the rendered window height so
                 // the text stays readable in normal mode, fullscreen, AND
                 // shrinks proportionally when in PiP (480x270).
-                StreamBuilder<List<String>>(
-                  stream: _player.stream.subtitle,
-                  initialData: _player.state.subtitle,
-                  builder: (context, snap) {
-                    final lines = snap.data ?? [];
-                    final text = lines.where((l) => l.trim().isNotEmpty).join('\n');
-                    if (text.isEmpty) return const SizedBox.shrink();
-                    // Reference height = 720p (typical desktop tier).
-                    // Anything smaller scales down linearly; bigger
-                    // windows keep the user's chosen size.
-                    // Use MediaQuery (not LayoutBuilder) because Positioned
-                    // requires a direct Stack ancestor as its parent.
-                    const refHeight = 720.0;
-                    final winH = MediaQuery.of(context).size.height;
-                    final scale = (winH / refHeight).clamp(0.35, 1.0);
-                    final hSidePad = 24.0 * scale;
-                    return Positioned(
-                      left: hSidePad,
-                      right: hSidePad,
-                      bottom: _subtitleBottomPadding * scale,
-                      child: IgnorePointer(
-                        child: Text(
-                          text,
-                          style: _buildSubtitleTextStyle(scale: scale),
-                          textAlign: TextAlign.center,
+                // Custom subtitle overlay — hidden when mpv natively handles
+                // ASS/SSA or image-based subtitles (they render on the video frame instead).
+                if (!_isNativeSubtitle)
+                  StreamBuilder<List<String>>(
+                    stream: _player.stream.subtitle,
+                    initialData: _player.state.subtitle,
+                    builder: (context, snap) {
+                      final lines = snap.data ?? [];
+                      final text = lines.where((l) => l.trim().isNotEmpty).join('\n');
+                      if (text.isEmpty) return const SizedBox.shrink();
+                      const refHeight = 720.0;
+                      final winH = MediaQuery.of(context).size.height;
+                      final scale = (winH / refHeight).clamp(0.35, 1.0);
+                      final hSidePad = 24.0 * scale;
+                      return Positioned(
+                        left: hSidePad,
+                        right: hSidePad,
+                        bottom: _subtitleBottomPadding * scale,
+                        child: IgnorePointer(
+                          child: Text(
+                            text,
+                            style: _buildSubtitleTextStyle(scale: scale),
+                            textAlign: TextAlign.center,
+                          ),
                         ),
-                      ),
-                    );
-                  },
-                ),
+                      );
+                    },
+                  ),
 
                 // ── Controls Overlay ─────────────────────────────────────
                 // Hidden entirely while PiP is active — replaced by the

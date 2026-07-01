@@ -117,22 +117,38 @@ class TorrentFilter {
     
     if (!isVideoFile(t)) return false;
     
+    // Strict SXXEYY match
     final sXe = RegExp('s0*$season[ ._-]*e0*$episode\\b', caseSensitive: false);
-    if (sXe.hasMatch(t)) return true;
-
-    final xMatch = RegExp('\\b0*${season}x0*$episode\\b', caseSensitive: false);
-    if (xMatch.hasMatch(t)) return true;
-
-    final epOnly = RegExp('\\b0*$episode\\b');
-    if (epOnly.hasMatch(t)) {
-      final otherSxE = RegExp(r's\d+e\d+', caseSensitive: false);
-      if (!otherSxE.hasMatch(t) || sXe.hasMatch(t)) {
-         return true;
-      }
+    final anySxE = RegExp(r's\d+[ ._-]*e\d+\b', caseSensitive: false);
+    
+    if (anySxE.hasMatch(t)) {
+      return sXe.hasMatch(t); // If it has SxxEyy format, it MUST match the requested season/episode exactly.
     }
 
-    final eOnly = RegExp('e0*$episode\\b', caseSensitive: false);
+    // Strict [S]x[E] match (e.g. 1x01)
+    final xMatch = RegExp('\\b0*$season[ ._-]*x[ ._-]*0*$episode\\b', caseSensitive: false);
+    final anyXMatch = RegExp(r'\b\d+[ ._-]*x[ ._-]*\d+\b', caseSensitive: false);
+
+    if (anyXMatch.hasMatch(t)) {
+      return xMatch.hasMatch(t);
+    }
+
+    // Check for "season 2" when we want season 1
+    final wrongSeason = RegExp('\\bseason[ ._-]*(?!0*$season\\b)\\d+\\b', caseSensitive: false);
+    final rightSeason = RegExp('\\bseason[ ._-]*0*$season\\b', caseSensitive: false);
+    if (wrongSeason.hasMatch(t) && !rightSeason.hasMatch(t)) {
+      return false; // Explicitly in a different season's folder or named wrong season
+    }
+
+    // Fallbacks if no explicit season/episode format is found.
+    final eOnly = RegExp('\\be[ ._-]*0*$episode\\b', caseSensitive: false);
     if (eOnly.hasMatch(t)) return true;
+
+    final epOnlyStr = RegExp('\\bep(isode)?[ ._-]*0*$episode\\b', caseSensitive: false);
+    if (epOnlyStr.hasMatch(t)) return true;
+
+    final epOnly = RegExp('\\b0*$episode\\b');
+    if (epOnly.hasMatch(t)) return true;
 
     return false;
   }
